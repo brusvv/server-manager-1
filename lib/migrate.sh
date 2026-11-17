@@ -377,24 +377,39 @@ migrate_menu() {
 
 panel_backup_restore() {
     header "Бэкап / Восстановление"
-    local script_url="https://raw.githubusercontent.com/Remnawave/backup-restore/main/backup-restore.sh"
-    local script_path="/usr/local/bin/remnawave-backup"
+    # distillium/remnawave-backup-restore: расписание, Telegram и S3,
+    # шифрование age, выборочное восстановление.
+    # Точка входа запускается от root, поэтому версия закреплена тегом и SHA256.
+    local rw_tag="4.3.0"
+    local rw_sha256="ae36fa1df8a5998c599a643105b9386dbab6c3d25ef4381f77cdfdc5d841e6b2"
+    local script_url="https://raw.githubusercontent.com/distillium/remnawave-backup-restore/${rw_tag}/backup-restore.sh"
+    local tmp actual rc
 
-    if command -v remnawave-backup &>/dev/null; then
+    if command -v rw-backup &>/dev/null; then
         info "backup-restore уже установлен — запускаем..."
-        remnawave-backup
+        rw-backup
         return
     fi
 
-    info "Скачиваем backup-restore скрипт..."
-    if curl -fsSL "$script_url" -o "$script_path" 2>/dev/null; then
-        chmod +x "$script_path"
-        ok "backup-restore установлен: $script_path"
-        remnawave-backup
-    else
+    info "Скачиваем backup-restore ${rw_tag}..."
+    tmp=$(mktemp "${TMPDIR:-/tmp}/rw-backup-restore.XXXXXX") || { warn "Не удалось создать временный файл"; return 1; }
+    if ! curl -fsSL "$script_url" -o "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
         warn "Не удалось скачать скрипт"
         echo -e "  Установите вручную:"
-        echo -e "  ${CYAN}curl -fsSL $script_url | bash${NC}"
+        echo -e "  ${CYAN}curl -o ~/backup-restore.sh $script_url && chmod +x ~/backup-restore.sh && ~/backup-restore.sh${NC}"
         return 1
     fi
+    actual=$(sha256sum "$tmp" | awk '{print $1}')
+    if [ "$actual" != "$rw_sha256" ]; then
+        rm -f "$tmp"
+        warn "Контрольная сумма скрипта не совпала — запуск отменён"
+        info "Ожидалась ${rw_sha256:0:16}…, получена ${actual:0:16}…"
+        return 1
+    fi
+    chmod +x "$tmp"
+    ok "backup-restore ${rw_tag} скачан, контрольная сумма совпала"
+    "$tmp"; rc=$?
+    rm -f "$tmp"
+    return $rc
 }
