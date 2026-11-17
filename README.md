@@ -58,7 +58,8 @@ server-manager/
 │   │   └── menu.sh             # Меню и операции Hysteria2
 │   └── sripts/
 │       └── tests/
-│           └── test_mgmt_script_backup.sh
+│           ├── test_mgmt_script_backup.sh
+│           └── test_migrate_backup_restore.sh
 ├── integrations/               # Интеграционные компоненты
 ├── sub-injector/               # Rust-прокси для инжекции hy2:// в подписку
 └── docs/                       # Документация проекта
