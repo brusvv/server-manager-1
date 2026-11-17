@@ -207,7 +207,7 @@ do_backup() {
         while IFS= read -r f; do
             n=$((n+1)); [ "$n" -le 3 ] && continue
             [ -n "$(find "$f" -maxdepth 0 -mtime +7 2>/dev/null)" ] && rm -f "$f" "$f.sha256"
-        done < <(find "$b" -maxdepth 1 -type f -name "$pat" -printf '%T@ %p\\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
+        done < <(find "$b" -maxdepth 1 -type f -name "$pat" -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
     done
     find "$b" -maxdepth 1 -type f -name 'db_*.err' -mtime +7 -delete 2>/dev/null || true
     return 0
