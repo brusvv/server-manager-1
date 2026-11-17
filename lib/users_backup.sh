@@ -2,9 +2,9 @@
 # lib/users_backup.sh — Users-only transfer; prompts live here, data work in Python.
 
 users_backup_restore_menu() {
-    local _root="\${SCRIPT_DIR:-$(cd "$(dirname "\${BASH_SOURCE[0]}")/.." && pwd)}"
-    local _worker="\${_root}/lib/panel/py/users_backup.py"
-    local _backup_dir="\${RP_BACKUP_DIR:-/opt/remnawave-backups}"
+    local _root="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+    local _worker="${_root}/lib/panel/py/users_backup.py"
+    local _backup_dir="${RP_BACKUP_DIR:-/opt/remnawave-backups}"
     local _choice
 
     [ -f "$_worker" ] || { warn "Users-only модуль не найден: $_worker"; return 1; }
@@ -19,9 +19,9 @@ users_backup_restore_menu() {
         read -rp "  Выбор: " _choice < /dev/tty
         case "$_choice" in
             1)
-                local _out="\${_backup_dir}/users_$(date +%Y%m%d_%H%M%S).rwusers"
+                local _out="${_backup_dir}/users_$(date +%Y%m%d_%H%M%S).rwusers"
                 local _answer=""
-                read -rp "  Файл архива [\${_out}]: " _answer < /dev/tty
+                read -rp "  Файл архива [${_out}]: " _answer < /dev/tty
                 [ -n "$_answer" ] && _out="$_answer"
                 python3 "$_worker" export --output "$_out" || warn "Экспорт не завершён"
                 read -rp "  Нажмите Enter..." < /dev/tty
@@ -45,7 +45,7 @@ users_backup_restore_menu() {
                 if [ -n "$_squads_output" ]; then
                     mapfile -t _squad_rows <<< "$_squads_output"
                 fi
-                if [ "\${#_squad_rows[@]}" -eq 0 ]; then
+                if [ "${#_squad_rows[@]}" -eq 0 ]; then
                     warn "На целевой панели нет Internal Squad. Сначала создайте группу."
                     read -rp "  Нажмите Enter..." < /dev/tty
                     continue
@@ -53,14 +53,14 @@ users_backup_restore_menu() {
                 echo ""
                 echo "  В какую существующую группу добавить новых пользователей?"
                 local _i
-                for _i in "\${!_squad_rows[@]}"; do
-                    local _line="\${_squad_rows[$_i]}"
-                    printf '  %d) %s\n' "$((_i+1))" "\${_line#*$'\t'}"
+                for _i in "${!_squad_rows[@]}"; do
+                    local _line="${_squad_rows[$_i]}"
+                    printf '  %d) %s\n' "$((_i+1))" "${_line#*$'\t'}"
                 done
                 read -rp "  Номер группы: " _squad_choice < /dev/tty
                 [[ "$_squad_choice" =~ ^[0-9]+$ ]] || continue
-                [ "$_squad_choice" -ge 1 ] && [ "$_squad_choice" -le "\${#_squad_rows[@]}" ] || continue
-                _selected_uuid="\${_squad_rows[$((_squad_choice-1))]%%$'\t'*}"
+                [ "$_squad_choice" -ge 1 ] && [ "$_squad_choice" -le "${#_squad_rows[@]}" ] || continue
+                _selected_uuid="${_squad_rows[$((_squad_choice-1))]%%$'\t'*}"
                 if ! python3 "$_worker" preview --input "$_input" --squad-uuid "$_selected_uuid"; then
                     warn "Предварительная проверка не пройдена"
                     read -rp "  Нажмите Enter..." < /dev/tty
