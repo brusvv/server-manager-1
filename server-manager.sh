@@ -1,11 +1,11 @@
 #!/bin/bash
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  SERVER-MANAGER — VPN Server Management                         ║
-# ║  https://github.com/stump3/server-manager                       ║
+# ║  https://github.com/brusvv/server-manager-1                       ║
 # ╚══════════════════════════════════════════════════════════════════╝
 #
 # Использование:
-#   curl -fsSL https://raw.githubusercontent.com/stump3/server-manager/main/server-manager.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/brusvv/server-manager-1/sync/upstream-variant-f-j/server-manager.sh | bash
 #
 #   При первом запуске автоматически клонирует репозиторий в /root/server-manager/
 #   и перезапускается оттуда. Повторный запуск: server-manager
@@ -52,7 +52,7 @@ fi
 if [ -z "$SCRIPT_DIR" ]; then
     if [ "${SM_BOOTSTRAP_REEXEC:-0}" = "1" ]; then
         echo "Ошибка: не удалось определить рабочий каталог server-manager после перезапуска."
-        echo "Выполните: cd /root/server-manager && git reset --hard origin/main"
+        echo "Проверьте: cd /root/server-manager && git status && git branch --show-current"
         exit 1
     fi
     echo "  Первый запуск — клонируем репозиторий в ${INSTALL_DIR}..."
