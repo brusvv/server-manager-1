@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/brusvv/server-manager-1/sync/upstre
 
 ---
 
-## Структура репозитория
+## Ключевые файлы и каталоги
 
 ```
 server-manager/
@@ -50,7 +50,9 @@ server-manager/
 │   ├── panel/
 │   │   ├── install.sh          # Установка Remnawave Panel
 │   │   └── mgmt_script.sh      # Скрипт управления rp и резервное копирование
-│   ├── hy2/
+│   ├── migrate.sh              # Перенос Panel, MTProxy и Hysteria2
+│   ├── telemt/                 # Модули управления MTProxy
+│   └── hy2/
 │   │   ├── install.sh          # Установка Hysteria2
 │   │   ├── integration.sh      # Интеграция с Remnawave
 │   │   └── menu.sh             # Меню и операции Hysteria2
@@ -373,6 +375,9 @@ Remnawave Panel → Управление → 12) Переустановить с
 4) Перенести всё (Panel + MTProxy + Hysteria2)
 5) Бэкап / Восстановление (rw-backup)
 ```
+
+
+Для пункта «Бэкап / Восстановление» используется [distillium/remnawave-backup-restore](https://github.com/distillium/remnawave-backup-restore). При первой установке загрузчик скачивает версию `4.3.0` с закреплённым SHA256 и запускает её только после проверки контрольной суммы. После установки вызывается команда `rw-backup`.
 
 | Данные | Panel | MTProxy | Hysteria2 |
 |---|---|---|---|
