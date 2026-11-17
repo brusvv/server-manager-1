@@ -148,14 +148,37 @@ do_ssl() {
     fi
 }
 do_backup() {
-    local ts b ws_cfg
+    local ts b ws_cfg pg_user pg_db dump dump_err cfg_tar cfg_err old_umask
     ts=$(date +%Y%m%d_%H%M%S); b="$DIR/backups"; mkdir -p "$b"; cd "$DIR"
     [ -f "$DIR/Caddyfile" ] && ws_cfg="$DIR/Caddyfile" || ws_cfg="$DIR/nginx.conf"
-    docker compose exec -T remnawave-db pg_dump -U postgres postgres>"$b/db_$ts.sql" 2>/dev/null \
-        && _ok "БД → $b/db_$ts.sql" || _warn "Ошибка бэкапа БД"
-    tar -czf "$b/configs_$ts.tar.gz" "$DIR/.env" "$DIR/docker-compose.yml" "$ws_cfg" 2>/dev/null
-    _ok "Конфиги → $b/configs_$ts.tar.gz"
-    find "$b" -mtime +7 -delete 2>/dev/null||true
+    # Дампы и конфиги содержат секреты (.env, данные БД) — не оставляем их
+    # читаемыми для всех. umask действует только на файлы, созданные ниже.
+    old_umask=$(umask); umask 077
+    # Учётные данные БД — из .env (их пишет установщик); при отсутствии —
+    # значения установщика по умолчанию.
+    pg_user=$(grep -m1 '^POSTGRES_USER=' "$DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\r")
+    pg_db=$(grep -m1 '^POSTGRES_DB=' "$DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\r")
+    pg_user="${pg_user:-postgres}"; pg_db="${pg_db:-postgres}"
+    dump="$b/db_$ts.sql"; dump_err="$b/db_$ts.err"
+    if docker compose exec -T remnawave-db pg_dump -U "$pg_user" "$pg_db" >"$dump" 2>"$dump_err" \
+        && [ -s "$dump" ]; then
+        _ok "БД → $dump"; rm -f "$dump_err"
+    else
+        _warn "Ошибка бэкапа БД"
+        [ -s "$dump_err" ] && sed 's/^/    pg_dump: /' "$dump_err" >&2
+        rm -f "$dump" "$dump_err"
+    fi
+    cfg_tar="$b/configs_$ts.tar.gz"; cfg_err="$b/configs_$ts.err"
+    if tar -czf "$cfg_tar" "$DIR/.env" "$DIR/docker-compose.yml" "$ws_cfg" 2>"$cfg_err"; then
+        _ok "Конфиги → $cfg_tar"
+    else
+        _warn "Ошибка бэкапа конфигов"
+        [ -s "$cfg_err" ] && sed 's/^/    tar: /' "$cfg_err" >&2
+        rm -f "$cfg_tar"
+    fi
+    rm -f "$cfg_err"
+    umask "$old_umask"
+    find "$b" -maxdepth 1 -type f \\( -name 'db_*.sql' -o -name 'db_*.err' -o -name 'configs_*.tar.gz' \\) -mtime +7 -delete 2>/dev/null||true
 }
 do_health() {
     local ws; ws=$(_detect_ws)
