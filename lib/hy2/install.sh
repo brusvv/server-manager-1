@@ -358,7 +358,7 @@ PYEOF2
     echo ""
     echo "  QR-код:"
     if ! command -v qrencode &>/dev/null; then
-        apt-get install -y qrencode >/dev/null 2>&1 || true
+        apt-get -o DPkg::Lock::Timeout=300 install -y qrencode >/dev/null 2>&1 || true
     fi
     if command -v qrencode &>/dev/null; then
         qrencode -t ANSIUTF8 "$uri" 2>/dev/null || true
