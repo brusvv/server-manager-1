@@ -216,7 +216,7 @@ SVCEOF
 _hy_sub_injector_build() {
     local bin_path="$1"
     info "Устанавливаю зависимости сборки..."
-    apt-get install -y -q build-essential pkg-config libssl-dev 2>/dev/null || true
+    apt-get -o DPkg::Lock::Timeout=300 install -y -q build-essential pkg-config libssl-dev 2>/dev/null || true
 
     # Устанавливаем Rust если нет
     if ! command -v cargo &>/dev/null; then
