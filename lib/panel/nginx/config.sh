@@ -1,0 +1,253 @@
+# shellcheck shell=bash
+
+panel_generate_nginx_config() {
+    local MODE="$1"
+    local PANEL_DOMAIN="$2"
+    local SUB_DOMAIN="$3"
+    local SELFSTEAL_DOMAIN="$4"
+    local PC="$5"
+    local SC="$6"
+    local STC="$7"
+    local COOKIE_KEY="$8"
+    local COOKIE_VAL="$9"
+
+        # ── nginx.conf ────────────────────────────────────────────
+        local LISTEN_DIR REAL_IP_P REAL_IP_S
+        if [ "$(core_topology_public_ingress_owner "$MODE")" = "xray" ]; then
+            LISTEN_DIR="listen unix:/dev/shm/nginx.sock ssl proxy_protocol;"
+            REAL_IP_P="\$proxy_protocol_addr"
+            REAL_IP_S="\$proxy_protocol_addr"
+        else
+            LISTEN_DIR="listen 443 ssl;"
+            REAL_IP_P="\$remote_addr"
+            REAL_IP_S="\$remote_addr"
+        fi
+
+    cat > /opt/remnawave/nginx.conf << NGINX_CONF_EOF
+server_names_hash_bucket_size 64;
+
+upstream remnawave { server 127.0.0.1:3000; }
+upstream remnawave-sub { server 127.0.0.1:3010; }
+
+map \$http_upgrade \$connection_upgrade {
+    default upgrade; "" close;
+}
+
+# Cookie-защита панели: доступ только с ?${COOKIE_KEY}=${COOKIE_VAL}
+map \$http_cookie \$auth_cookie {
+    default 0; "~*${COOKIE_KEY}=${COOKIE_VAL}" 1;
+}
+map \$arg_${COOKIE_KEY} \$auth_query {
+    default 0; "${COOKIE_VAL}" 1;
+}
+map "\$auth_cookie\$auth_query" \$authorized {
+    "~1" 1; default 0;
+}
+map \$arg_${COOKIE_KEY} \$set_cookie_header {
+    "${COOKIE_VAL}" "${COOKIE_KEY}=${COOKIE_VAL}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=31536000";
+    default "";
+}
+
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_ecdh_curve X25519:prime256v1:secp384r1;
+ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+ssl_prefer_server_ciphers on;
+ssl_session_timeout 1d;
+ssl_session_cache shared:MozSSL:10m;
+ssl_session_tickets off;
+
+server {
+    server_name ${PANEL_DOMAIN};
+    ${LISTEN_DIR}
+    http2 on;
+    ssl_certificate "/etc/letsencrypt/live/${PC}/fullchain.pem";
+    ssl_certificate_key "/etc/letsencrypt/live/${PC}/privkey.pem";
+    ssl_trusted_certificate "/etc/letsencrypt/live/${PC}/fullchain.pem";
+    add_header Set-Cookie \$set_cookie_header;
+
+    location ^~ /oauth2/ {
+        if (\$http_referer !~ "^https://oauth\\.telegram\\.org/") {
+            return 444;
+        }
+        proxy_http_version 1.1;
+        proxy_pass http://remnawave;
+        proxy_set_header Host \$host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header X-Real-IP ${REAL_IP_P};
+        proxy_set_header X-Forwarded-For ${REAL_IP_P};
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
+        proxy_send_timeout 60s; proxy_read_timeout 60s;
+    }
+    location / {
+        error_page 418 = @unauthorized;
+        recursive_error_pages on;
+        if (\$authorized = 0) { return 418; }
+        proxy_http_version 1.1;
+        proxy_pass http://remnawave;
+        proxy_set_header Host \$host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header X-Real-IP ${REAL_IP_P};
+        proxy_set_header X-Forwarded-For ${REAL_IP_P};
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
+        proxy_send_timeout 60s; proxy_read_timeout 60s;
+    }
+    location @unauthorized {
+        root /var/www/html; index index.html; try_files /index.html =444;
+    }
+}
+
+server {
+    server_name ${SUB_DOMAIN};
+    ${LISTEN_DIR}
+    http2 on;
+    ssl_certificate "/etc/letsencrypt/live/${SC}/fullchain.pem";
+    ssl_certificate_key "/etc/letsencrypt/live/${SC}/privkey.pem";
+    ssl_trusted_certificate "/etc/letsencrypt/live/${SC}/fullchain.pem";
+
+    location / {
+        proxy_http_version 1.1;
+        proxy_pass http://remnawave-sub;
+        proxy_set_header Host \$host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header X-Real-IP ${REAL_IP_S};
+        proxy_set_header X-Forwarded-For ${REAL_IP_S};
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
+        proxy_send_timeout 60s; proxy_read_timeout 60s;
+        proxy_intercept_errors on;
+        error_page 400 404 500 502 @sub_error;
+    }
+    location @sub_error { return 444; }
+}
+
+server {
+    server_name ${SELFSTEAL_DOMAIN};
+    ${LISTEN_DIR}
+    http2 on;
+    ssl_certificate "/etc/letsencrypt/live/${STC}/fullchain.pem";
+    ssl_certificate_key "/etc/letsencrypt/live/${STC}/privkey.pem";
+    ssl_trusted_certificate "/etc/letsencrypt/live/${STC}/fullchain.pem";
+    root /var/www/html; index index.html;
+    add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex" always;
+}
+
+server {
+    ${LISTEN_DIR}
+    server_name _;
+    ssl_certificate "/etc/letsencrypt/live/${PC}/fullchain.pem";
+    ssl_certificate_key "/etc/letsencrypt/live/${PC}/privkey.pem";
+    ssl_reject_handshake on;
+    return 444;
+}
+NGINX_CONF_EOF
+}
+
+# panel_generate_nginx_config_f() moved to lib/panel/nginx/variant_f.sh, and
+# panel_generate_nginx_config_j() lives in lib/panel/nginx/variant_j.sh —
+# see those files for Variant F/J's respective topologies and constants.
+# Moved out 2026-08-31 so this file stays a thin dispatcher and each
+# variant's nginx generator lives in its own file (variant_f.sh /
+# variant_j.sh), per the module split decided for Variant F/J. lib/panel.sh
+# sources nginx/variant_f and nginx/variant_j alongside this file, so both
+# panel_generate_nginx_config_f() and panel_generate_nginx_config_j() are
+# defined before panel_generate_webserver_config() below ever calls them.
+
+# panel_generate_webserver_config — dispatcher, выбирает nginx/caddy backend
+# по значению WEB_SERVER. Orchestration-level функция; отдельный третий
+# файл для одного диспетчера не создаём (см. решение Stage 6h).
+#
+# $11/$12 (TELEMT_DOMAIN/TELEMT_PORT) — WIRED 2026-08-31 (TeleMT wiring
+# audit): lib/panel/cli.sh's panel_cli_collect_j_options() has collected
+# these since the CLI-extraction stage, but this function still only
+# accepted its original 10 args, so the values never reached
+# panel_generate_nginx_config_j() — every MODE=J install silently got
+# variant_j.sh's own TELEMT_DOMAIN="" default (TeleMT disabled) regardless
+# of what was collected. Fixed by accepting them here (optional — MODE=1/2/F
+# callers, and MODE=J with TeleMT disabled, simply pass empty strings,
+# which variant_j.sh's own renderer already treats as "no TeleMT branch")
+# and forwarding them to panel_generate_nginx_config_j()'s existing
+# 9th/10th positional args (unchanged since they were added — see that
+# function's own header comment).
+panel_generate_webserver_config() {
+    local WEB_SERVER="$1"
+    local MODE="$2"
+    local PANEL_DOMAIN="$3"
+    local SUB_DOMAIN="$4"
+    local SELFSTEAL_DOMAIN="$5"
+    local PC="$6"
+    local SC="$7"
+    local STC="$8"
+    local COOKIE_KEY="$9"
+    local COOKIE_VAL="${10}"
+    local TELEMT_DOMAIN="${11:-}"
+    local TELEMT_PORT="${12:-}"
+    # F_XHTTP_ENABLE (2026-09-05, F+XHTTP) — OPTIONAL 13th arg, "0"/"1".
+    # Backward compatible: every existing 10/11/12-arg call site keeps
+    # working unchanged (omitted => "0" => F's single-Vision-leg output,
+    # byte-identical to before this arg existed).
+    #
+    # FIXED 2026-09-05 (F+XHTTP audit): this dispatcher previously
+    # decided F-shape vs J-shape purely from a local `[ "$MODE" = "J" ]`
+    # -derived XHTTP_ENABLE, which is WRONG for F+XHTTP: it would have
+    # routed a MODE=F + "XHTTP wanted" install to
+    # panel_generate_nginx_config_j() — Variant J's generator, with
+    # Variant J's OWN ports (J_XRAY_VISION_PORT=18443,
+    # J_XHTTP_PUBLIC_PORT=8443, J_NGINX_HTTPS_PORT=7444) — silently
+    # replacing Variant F's topology and ports (F_XRAY_VISION_PORT=8443,
+    # F_NGINX_HTTPS_PORT=7443) entirely, not adding an XHTTP leg to F as
+    # intended. MODE and "does this profile carry an XHTTP leg" are now
+    # kept as two separate questions: MODE alone selects WHICH generator
+    # runs (F always uses panel_generate_nginx_config_f(), J always uses
+    # panel_generate_nginx_config_j() — J already always had its XHTTP
+    # leg built in, unconditionally, so it takes no such flag), and
+    # F_XHTTP_ENABLE only ever reaches panel_generate_nginx_config_f()'s
+    # own optional 11th arg, controlling whether F's generator adds its
+    # OWN, F-specific XHTTP public leg (F_XHTTP_PUBLIC_PORT=9443 ->
+    # F_XRAY_XHTTP_PORT=19444, see variant_f.sh) — never J's.
+    local F_XHTTP_ENABLE="${13:-0}"
+
+    if [ "$WEB_SERVER" = "1" ]; then
+        # MODE=F/MODE=J together route to the co-located nginx generators
+        # instead of panel_generate_nginx_config()'s MODE=1/2 heredoc —
+        # dispatcher-level only, panel_generate_nginx_config()'s body is
+        # untouched (guarantees MODE=1/2 stay byte-identical). WEB_SERVER=2
+        # + MODE=F/J is already rejected upstream (lib/panel/cli.sh's
+        # panel_cli_select_webserver(), and again defensively in
+        # lib/panel/compose/colocated.sh, before this function is ever
+        # reached with such a combination) — no guard needed here too.
+        #
+        # WHICH generator runs is decided by MODE alone (restored to a
+        # direct MODE check — see FIXED comment above for why the old
+        # XHTTP_ENABLE-derived branch was wrong). TELEMT_DOMAIN/TELEMT_PORT
+        # are forwarded to both; each generator treats an empty
+        # TELEMT_DOMAIN as "disabled" on its own. F_XHTTP_ENABLE is
+        # forwarded ONLY to panel_generate_nginx_config_f() — J's call has
+        # no such arg, it is not applicable to J's already-fixed topology.
+        if [ "$MODE" = "J" ]; then
+            panel_generate_nginx_config_j \
+                "$PANEL_DOMAIN" "$SUB_DOMAIN" "$SELFSTEAL_DOMAIN" \
+                "$PC" "$SC" "$STC" "$COOKIE_KEY" "$COOKIE_VAL" \
+                "$TELEMT_DOMAIN" "$TELEMT_PORT"
+        elif [ "$MODE" = "F" ]; then
+            panel_generate_nginx_config_f \
+                "$PANEL_DOMAIN" "$SUB_DOMAIN" "$SELFSTEAL_DOMAIN" \
+                "$PC" "$SC" "$STC" "$COOKIE_KEY" "$COOKIE_VAL" \
+                "$TELEMT_DOMAIN" "$TELEMT_PORT" "$F_XHTTP_ENABLE"
+        else
+            panel_generate_nginx_config \
+                "$MODE" "$PANEL_DOMAIN" "$SUB_DOMAIN" "$SELFSTEAL_DOMAIN" \
+                "$PC" "$SC" "$STC" "$COOKIE_KEY" "$COOKIE_VAL"
+        fi
+    else
+        panel_generate_caddy_config \
+            "$MODE" "$COOKIE_KEY" "$COOKIE_VAL"
+    fi
+}

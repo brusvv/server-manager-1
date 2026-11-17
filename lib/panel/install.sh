@@ -1,0 +1,416 @@
+# shellcheck shell=bash
+
+panel_install_prerequisites() {
+    local web_server="$1"
+    local cert_method="$2"
+
+    [ ! -f /swapfile ] && {
+        fallocate -l 2G /swapfile && chmod 600 /swapfile
+        mkswap /swapfile && swapon /swapfile
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+        ok "Swap 2G"
+    }
+    grep -q "net.ipv4.tcp_congestion_control = bbr" /etc/sysctl.conf || {
+        echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf
+        echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
+        sysctl -p >/dev/null 2>&1
+    }
+    apt-get -o DPkg::Lock::Timeout=300 update -y -q
+    PKGS=(curl wget git nano htop socat jq openssl ca-certificates gnupg \
+          lsb-release dnsutils unzip cron)
+    if [ "$web_server" = "1" ]; then
+        PKGS+=(certbot python3-certbot-dns-cloudflare)
+        [ "$cert_method" = "3" ] && PKGS+=(python3-pip)
+    fi
+    MISSING=(); for p in "${PKGS[@]}"; do dpkg -l "$p" &>/dev/null || MISSING+=("$p"); done
+    [ ${#MISSING[@]} -gt 0 ] && apt-get -o DPkg::Lock::Timeout=300 install -y -q "${MISSING[@]}"
+    if [ "$web_server" = "1" ] && [ "$cert_method" = "3" ]; then
+        certbot plugins 2>/dev/null | grep -q "dns-gcore" || \
+            python3 -m pip install --break-system-packages certbot-dns-gcore >/dev/null 2>&1 || true
+    fi
+    systemctl is-active --quiet cron || systemctl start cron
+    systemctl is-enabled --quiet cron || systemctl enable cron
+    ok "Системные пакеты"
+    ! command -v docker &>/dev/null && {
+        curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 # intentional: official Docker installer
+        systemctl enable docker >/dev/null 2>&1
+        ok "Docker установлен"
+    } || ok "Docker: $(docker --version | cut -d' ' -f3 | tr -d ',')"
+    ufw allow 22/tcp  comment 'SSH'   >/dev/null 2>&1
+    ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1
+    ufw --force enable >/dev/null 2>&1
+    ok "UFW настроен"
+}
+
+panel_generate_env() {
+    local PANEL_DOMAIN="$1"
+    local SUB_DOMAIN="$2"
+    local WEB_SERVER="$3"
+
+    SUPERADMIN_USER=$(gen_user)
+    SUPERADMIN_PASS=$(gen_password)
+    COOKIE_KEY=$(gen_user)
+    COOKIE_VAL=$(gen_user)
+    APP_SECRET=$(gen_hex64)
+    METRICS_USER=$(gen_user)
+    METRICS_PASS=$(gen_user)
+
+    cat > /opt/remnawave/.env << EOF
+APP_PORT=3000
+METRICS_PORT=3001
+API_INSTANCES=1
+DATABASE_URL="postgresql://postgres:postgres@remnawave-db:5432/postgres"
+REDIS_SOCKET=/var/run/valkey/valkey.sock
+APP_SECRET=$APP_SECRET
+JWT_AUTH_LIFETIME=168
+FRONT_END_DOMAIN=$PANEL_DOMAIN
+SUB_PUBLIC_DOMAIN=$SUB_DOMAIN
+METRICS_USER=$METRICS_USER
+METRICS_PASS=$METRICS_PASS
+WEBHOOK_ENABLED=false
+WEBHOOK_URL=https://your-webhook-url.com/endpoint
+WEBHOOK_SECRET_HEADER=$(gen_hex64)
+IS_TELEGRAM_NOTIFICATIONS_ENABLED=false
+TELEGRAM_BOT_TOKEN=change_me
+# TELEGRAM_BOT_PROXY=socks5://user:password@host:port
+TELEGRAM_NOTIFY_SERVICE=change_me
+# Thread ID указывается через двоеточие в chat_id: "-100123:80"
+TELEGRAM_NOTIFY_USERS_CHAT_ID=change_me
+TELEGRAM_NOTIFY_NODES_CHAT_ID=change_me
+TELEGRAM_NOTIFY_CRM_CHAT_ID=change_me
+NOT_CONNECTED_USERS_NOTIFICATIONS_ENABLED=false
+NOT_CONNECTED_USERS_NOTIFICATIONS_AFTER_HOURS=[6, 24, 48]
+BANDWIDTH_USAGE_NOTIFICATIONS_ENABLED=false
+BANDWIDTH_USAGE_NOTIFICATIONS_THRESHOLD=[60, 80]
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=postgres
+EOF
+
+    # Монтирование сертификатов — только для Nginx
+    # Монтируем весь /etc/letsencrypt чтобы симлинки из live/ → archive/ работали внутри контейнера
+    CERT_VOLUMES=""
+    [ "$WEB_SERVER" = "1" ] && CERT_VOLUMES="      - /etc/letsencrypt:/etc/letsencrypt:ro
+"
+}
+
+panel_pause_before_launch() {
+    local WEB_SERVER="$1"
+
+    # ── Пауза — просмотр конфигурации ───────────────────────────
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${WHITE}  📝 Конфигурационные файлы сгенерированы${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${WHITE}  Перед запуском можно открыть новый SSH-сеанс и проверить${NC}"
+    echo -e "${WHITE}  или изменить любой из файлов через nano:${NC}"
+    echo ""
+    echo -e "  ${CYAN}nano /opt/remnawave/.env${NC}             ${GRAY}# секреты, JWT, домены${NC}"
+    echo -e "  ${CYAN}nano /opt/remnawave/docker-compose.yml${NC}  ${GRAY}# образы, порты${NC}"
+    if [ "$WEB_SERVER" = "1" ]; then
+        echo -e "  ${CYAN}nano /opt/remnawave/nginx.conf${NC}       ${GRAY}# SSL, cookie-защита${NC}"
+    else
+        echo -e "  ${CYAN}nano /opt/remnawave/Caddyfile${NC}        ${GRAY}# маршруты, cookie-защита${NC}"
+    fi
+    echo ""
+    echo -e "  ${GRAY}Ctrl+O → Enter — сохранить | Ctrl+X — выйти из nano${NC}"
+    echo ""
+    read -p "  Нажмите Enter когда готовы к запуску..." < /dev/tty
+    ok "Продолжаем установку"
+}
+
+panel_install_summary() {
+    local PANEL_DOMAIN="$1"
+    local SUB_DOMAIN="$2"
+    local SELFSTEAL_DOMAIN="$3"
+    local SUPERADMIN_USER="$4"
+    local SUPERADMIN_PASS="$5"
+    local COOKIE_KEY="$6"
+    local COOKIE_VAL="$7"
+
+    # ── Итог ─────────────────────────────────────────────────────
+    echo ""
+    echo -e "${BOLD}${GREEN}  ✓ Remnawave Panel установлена${NC}"
+    echo ""
+    echo -e "${BOLD}${WHITE}  Доступ${NC}"
+    echo -e "${GRAY}  ──────────────────────────────${NC}"
+    echo -e "  ${GRAY}Панель    ${NC}https://${PANEL_DOMAIN}"
+    echo -e "  ${GRAY}Подписки  ${NC}https://${SUB_DOMAIN}"
+    echo -e "  ${GRAY}Selfsteal ${NC}https://${SELFSTEAL_DOMAIN}"
+    echo ""
+    echo -e "${BOLD}${WHITE}  Учётные данные${NC}"
+    echo -e "${GRAY}  ──────────────────────────────${NC}"
+    echo -e "  ${GRAY}Логин   ${NC}${SUPERADMIN_USER}"
+    echo -e "  ${GRAY}Пароль  ${NC}${SUPERADMIN_PASS}"
+    echo ""
+    echo -e "${BOLD}${YELLOW}  ⚠  Сохраните — показывается один раз${NC}"
+    echo -e "${GRAY}  ──────────────────────────────${NC}"
+    echo -e "  ${CYAN}https://${PANEL_DOMAIN}/auth/login?${COOKIE_KEY}=${COOKIE_VAL}${NC}"
+    echo ""
+    echo -e "${BOLD}${WHITE}  Управление${NC}"
+    echo -e "${GRAY}  ──────────────────────────────${NC}"
+    echo -e "  ${GRAY}Команда   ${NC}remnawave_panel  ${GRAY}или${NC}  rp"
+    echo ""
+    read -rp "  Нажмите Enter чтобы продолжить (данные выше сохраните сейчас)..." < /dev/tty
+    echo ""
+}
+
+# panel_install_existing_state_detected — true if the remnawave-db-data
+# named Docker volume already exists, i.e. a prior panel_install() run
+# already brought Postgres up for this Panel.
+#
+# CONFIRMED DEFECT (this session, mechanically reproduced against the
+# real extracted lib/panel/api.sh register/login block, mocked only at
+# the panel_api()/panel_api_status() HTTP boundary): panel_generate_env()
+# unconditionally mints a brand-new SUPERADMIN_USER/SUPERADMIN_PASS on
+# every call and never reads any existing state -- these credentials
+# are not persisted anywhere (not in .env, not anywhere else; see that
+# function's own header). remnawave-db-data is a named, non-external
+# volume (lib/panel/compose/common.sh) that plain `docker compose up -d`
+# (panel_setup_api(), lib/panel/api.sh) neither creates fresh nor wipes,
+# so it survives a second panel_install() run untouched. If it already
+# holds a superadmin from an earlier run, panel_setup_api()'s
+# register-then-login fallback (POST /api/auth/register -> confirmed
+# 403/E000 "already registered" -> POST /api/auth/login) logs in with
+# THIS run's newly-generated credentials, which do not match whatever
+# the DB actually has -- login fails and panel_install() dies partway
+# through, after already having overwritten .env/docker-compose.yml and
+# mutated UFW/SSL/packages for nothing.
+#
+# This check is deliberately coarse: it does not try to distinguish
+# "DB already has a superadmin" from "Postgres container started but
+# /api/auth/register was never reached" (e.g. the readiness-wait loop
+# in panel_setup_api() died first) -- narrowing that further would need
+# to inspect inside the DB or hit the Panel API before this guard runs,
+# neither of which is available yet at this point in the lifecycle.
+# The volume's mere existence is treated as "existing installation" and
+# errs toward directing the operator to the already-correct, explicitly
+# destructive panel_reinstall() (lib/panel/management.sh — docker
+# compose down -v + docker system prune -a --volumes -f + rm -rf
+# /opt/remnawave, gated on a typed "YES") rather than guessing further.
+# panel_reinstall() itself is unaffected: it removes this exact volume
+# synchronously before its own, later call to panel_install(), so by
+# the time this guard runs there, the volume is already gone and this
+# function correctly returns false.
+panel_install_existing_state_detected() {
+    command -v docker &>/dev/null || return 1
+    docker volume inspect remnawave-db-data >/dev/null 2>&1
+}
+
+panel_install() {
+    STEP_NUM=0; TOTAL_STEPS=5
+    step "Установка Remnawave Panel"
+    STEP_NUM=1
+    check_root
+
+    # Fail fast, before any mutation (CLI collection is not a mutation;
+    # everything from panel_install_prerequisites() onward is: package
+    # installation, Docker, UFW, SSL, .env/compose generation,
+    # containers). See panel_install_existing_state_detected()'s own
+    # comment for the exact defect this prevents.
+    if panel_install_existing_state_detected; then
+        die "Panel уже установлен (обнаружено существующее состояние БД: volume remnawave-db-data). Обычная установка не предназначена для повторного использования поверх существующей установки. Для полного сброса и переустановки используйте пункт меню «Переустановить (сброс всех данных!)»."
+    fi
+
+    # ── Сбор данных (lib/panel/cli.sh) ──────────────────────────────
+    local MODE PANEL_DOMAIN SUB_DOMAIN SELFSTEAL_DOMAIN WEB_SERVER
+    local CERT_METHOD PANEL_CF_EMAIL PANEL_CF_KEY PANEL_LE_EMAIL GCORE_TOKEN
+    local TELEMT_ENABLED TELEMT_DOMAIN TELEMT_PORT
+    local TELEMT_INSTALL_ACTION TELEMT_INSTALL_MODE
+    local F_XHTTP_ENABLE
+
+    panel_cli_select_mode
+    panel_cli_collect_domains
+    panel_cli_select_webserver
+    panel_cli_select_cert
+    panel_cli_select_f_xhttp
+    panel_cli_collect_j_options
+    panel_cli_show_summary "$MODE" "$WEB_SERVER" "$PANEL_DOMAIN" "$SUB_DOMAIN" "$SELFSTEAL_DOMAIN" \
+        "$CERT_METHOD" "$TELEMT_ENABLED" "$TELEMT_DOMAIN" "$TELEMT_PORT"
+
+    echo ""
+    info "Проверка DNS..."
+    check_dns "$PANEL_DOMAIN"     || warn "Проверьте DNS для $PANEL_DOMAIN"
+    check_dns "$SUB_DOMAIN"       || warn "Проверьте DNS для $SUB_DOMAIN"
+    check_dns "$SELFSTEAL_DOMAIN" || warn "Проверьте DNS для $SELFSTEAL_DOMAIN"
+
+    # ── Зависимости ──────────────────────────────────────────────
+    STEP_NUM=$(( STEP_NUM + 1 ))
+    step "Зависимости"
+    panel_install_prerequisites "$WEB_SERVER" "$CERT_METHOD"
+
+    local PC="" SC="" STC=""
+    panel_install_ssl "$WEB_SERVER" "$CERT_METHOD" \
+                       "$PANEL_DOMAIN" "$SUB_DOMAIN" "$SELFSTEAL_DOMAIN" \
+                       "$PANEL_CF_KEY" "$PANEL_CF_EMAIL" "$GCORE_TOKEN" \
+                       "$PANEL_LE_EMAIL"
+
+    # ── Генерация конфигурации ───────────────────────────────────
+    STEP_NUM=$(( STEP_NUM + 1 ))
+    step "Генерация конфигурации"
+    mkdir -p /opt/remnawave && cd /opt/remnawave
+
+    local SUPERADMIN_USER SUPERADMIN_PASS COOKIE_KEY COOKIE_VAL
+    local APP_SECRET METRICS_USER METRICS_PASS
+    local CERT_VOLUMES=""
+    panel_generate_env "$PANEL_DOMAIN" "$SUB_DOMAIN" "$WEB_SERVER"
+
+    panel_generate_compose "$WEB_SERVER" "$MODE" "$CERT_VOLUMES" "$PANEL_DOMAIN" "$SUB_DOMAIN" "$SELFSTEAL_DOMAIN"
+
+    # Core/Runtime adapter seam (docs/CORE_RUNTIME_CONTRACTS.md,
+    # lib/core/deployment.sh, lib/core/adapter_webserver.sh): resolve the
+    # already-collected legacy values into a Deployment once, then let
+    # panel_core_generate_webserver_config() forward it to the existing,
+    # UNCHANGED panel_generate_webserver_config() dispatcher. This is a
+    # round trip, not a behavior change — proven byte-identical across
+    # MODE=1/2/F/J, WEB_SERVER=1/2, F+XHTTP, and F/J+TeleMT combinations
+    # by lib/sripts/tests/test_adapter_webserver.sh's diff assertions.
+    # core_resolve_deployment()'s own inputs are exactly the same locals
+    # this call site already had in scope for the direct call it
+    # replaces — no new value is invented, nothing read twice from two
+    # sources.
+    core_resolve_deployment "$MODE" "$F_XHTTP_ENABLE" "$WEB_SERVER" \
+        "$PANEL_DOMAIN" "$SUB_DOMAIN" "$SELFSTEAL_DOMAIN" \
+        "$TELEMT_DOMAIN" "$TELEMT_PORT"
+    panel_core_generate_webserver_config \
+        "$PC" \
+        "$SC" \
+        "$STC" \
+        "$COOKIE_KEY" \
+        "$COOKIE_VAL"
+
+    ok "Конфигурация сгенерирована"
+
+    # F+XHTTP / J public XHTTP firewall (2026-09-05, Commit 2.H): neither
+    # port was ever opened by panel_install_prerequisites() (which only
+    # opens 22/tcp and 443/tcp, unconditionally, before MODE-specific
+    # config even exists) — confirmed by direct read of that function.
+    # For MODE=J this was a pre-existing gap (J_XHTTP_PUBLIC_PORT=8443 has
+    # always been part of J's topology, nginx has always listened there,
+    # ufw never permitted it), fixed here since it's in the exact same
+    # code path being touched for F+XHTTP and the fix is a single,
+    # low-risk `ufw allow` line — not a broader firewall refactor.
+    #
+    # Adapter #9 (2026-09-07): the gate ("should a public XHTTP port be
+    # opened at all for this Deployment") used to be a second, independent
+    # raw `[ "$MODE" = "J" ] || { [ "$MODE" = "F" ] && [ "$F_XHTTP_ENABLE" = "1" ]; }`
+    # re-derivation of the exact same fact this same function already
+    # asks lib/core/deployment.sh's core_deployment_has_capability("XHTTP")
+    # for, a few lines below, to compute _api_xhttp_enable (Adapter #4).
+    # core_resolve_deployment() has already run above (line 222), so
+    # DEPLOYMENT_* is resolved here — same precondition Adapter #4 already
+    # relies on at its own call site further down in this function.
+    #
+    # WIRED to lib/core/port_allocation.sh (2026-09-08, Architecture Gap
+    # Discovery / Candidate 2): WHICH port to open now comes from
+    # core_port_allocation_public() instead of a raw MODE branch over
+    # J_XHTTP_PUBLIC_PORT/F_XHTTP_PUBLIC_PORT. Safe specifically BECAUSE
+    # of the gate above, not in spite of it: core_deployment_has_capability
+    # ("XHTTP") can only be true when DEPLOYMENT_TOPOLOGY is "F" (with
+    # F_XHTTP_ENABLE=1 explicitly turning on the optional XHTTP capability)
+    # or "J" (XHTTP is intrinsically required there) — proved exhaustively
+    # from lib/core/topology.sh's own core_topology_required_capabilities()
+    # ("1"->Vision, "2"->PanelSub, "F"->Vision, "J"->"Vision XHTTP") and
+    # core_topology_optional_capabilities() ("1"|"2"|"J"->"", "F"->"XHTTP"):
+    # no topology other than F or J can ever reach this block. So, unlike
+    # panel_reality_xhttp_inbound_port() in lib/panel/api.sh (Candidate 1),
+    # which runs unconditionally for every MODE and therefore keeps a raw
+    # literal `*` catch-all arm, this call site needs no fallback arm at
+    # all — core_port_allocation_public("1"|"2", "xhttp") is a real
+    # failure mode of the accessor (no row for those topologies) but a
+    # provably unreachable one here. Deliberately no fallback added: a
+    # future violation of that invariant should fail loudly (this line
+    # sits in a plain command's argument, not a case arm gated by `&&`/
+    # `||`, so a failing command substitution here DOES trip `set -e`
+    # under this project's `set -euo pipefail` convention) rather than
+    # silently reintroducing a stale literal. F_XHTTP_PUBLIC_PORT/
+    # J_XHTTP_PUBLIC_PORT (lib/panel/nginx/variant_f.sh/variant_j.sh) are
+    # no longer read at this call site at all; those files themselves are
+    # untouched. lib/panel/api.sh:483-488's own, separate, structurally
+    # similar XHTTP_PUBLIC_PORT_VAL computation is a distinct, later
+    # candidate — deliberately not touched here.
+    if core_deployment_has_capability "XHTTP"; then
+        local _xhttp_ufw_port_desc
+        _xhttp_ufw_port_desc="$(core_port_allocation_public "$MODE" "xhttp")"
+        ufw allow "${_xhttp_ufw_port_desc}/tcp" comment "Variant $MODE XHTTP" >/dev/null 2>&1
+    fi
+
+    # ── TeleMT integrated (MODE=F/J, опционально) ──────────────────
+    # Nginx routing для TeleMT уже сгенерирован выше (внутри
+    # panel_generate_webserver_config → variant_f.sh/variant_j.sh).
+    # Здесь — только сам процесс TeleMT: вызывается non-interactively
+    # ТОЛЬКО когда panel_cli_collect_j_options() решила, что нужно
+    # действие ("new"/"reconfigure"); "keep" (существующий integrated,
+    # оставлен как есть) и "" (выключено/standalone обнаружен) сюда не
+    # попадают — TeleMT-процесс в этих случаях не трогается вообще.
+    if [ "$TELEMT_ENABLED" = "true" ] && { [ "$TELEMT_INSTALL_ACTION" = "new" ] || [ "$TELEMT_INSTALL_ACTION" = "reconfigure" ]; }; then
+        local _telemt_use_me="true" _telemt_socks_addr="" _telemt_socks_user="" _telemt_socks_pass=""
+        local -a _telemt_pairs=()
+        if [ "$TELEMT_INSTALL_ACTION" = "reconfigure" ]; then
+            # Меняем ТОЛЬКО domain/port (явный выбор оператора в cli.sh);
+            # upstream/ME/пользователи переносятся из текущего конфига
+            # без изменений.
+            local _telemt_existing_cfg; _telemt_existing_cfg=$(telemt_detect_config_path)
+            # `|| true` REQUIRED on each of these: absence of a match
+            # (no use_middle_proxy line / no [[upstreams]] block at all
+            # — the common case, since SOCKS5 upstream is optional) is a
+            # legitimate, expected outcome from these detectors, not an
+            # error — but under this codebase's global `set -euo
+            # pipefail`, `var=$(cmd)` aborts the whole panel_install()
+            # the instant `cmd` returns non-zero, which `grep`/pipeline
+            # "no match" does. Confirmed by direct reproduction this
+            # session: reconfiguring an integrated TeleMT that has no
+            # SOCKS5 upstream configured (i.e. every install that hasn't
+            # explicitly set one) silently killed panel_install() right
+            # here, before telemt_install_noninteractive was ever
+            # called. The detection functions themselves (lib/telemt/
+            # core.sh) are left returning their real exit code — this is
+            # the right place to tolerate "not found", not their
+            # definition, since other future callers may legitimately
+            # want to distinguish "found empty" from "not present".
+            _telemt_use_me=$(telemt_detect_use_me "$_telemt_existing_cfg") || true
+            [ -z "$_telemt_use_me" ] && _telemt_use_me="true"
+            _telemt_socks_addr=$(telemt_detect_socks5_addr "$_telemt_existing_cfg") || true
+            _telemt_socks_user=$(telemt_detect_socks5_user "$_telemt_existing_cfg") || true
+            _telemt_socks_pass=$(telemt_detect_socks5_pass "$_telemt_existing_cfg") || true
+            while IFS= read -r _pair; do
+                [ -n "$_pair" ] && _telemt_pairs+=("$_pair")
+            done < <(telemt_detect_user_pairs "$_telemt_existing_cfg")
+        fi
+        telemt_install_noninteractive "$TELEMT_PORT" "$TELEMT_DOMAIN" "$TELEMT_INSTALL_MODE" \
+            "$_telemt_use_me" "$_telemt_socks_addr" "$_telemt_socks_user" "$_telemt_socks_pass" \
+            "${_telemt_pairs[@]}"
+        ok "TeleMT: integrated (${TELEMT_INSTALL_MODE}, домен=${TELEMT_DOMAIN}, loopback :${TELEMT_PORT})"
+    fi
+
+    # Маскировочный сайт
+    panel_generate_selfsteal_site
+
+    panel_pause_before_launch "$WEB_SERVER"
+
+    # ── Запуск и автоконфигурация ────────────────────────────────
+    STEP_NUM=$(( STEP_NUM + 1 ))
+    step "Запуск и автоконфигурация"
+    # XHTTP_ENABLE for panel_setup_api() — Adapter #4 (2026-09-06):
+    # FIXED — this used to be a second, independent raw-MODE decision
+    # (`[ "$MODE" = "J" ] && ...; [ "$MODE" = "F" ] && ... "$F_XHTTP_ENABLE"`)
+    # computed HERE and then passed as an explicit 5th argument, which
+    # made panel_setup_api()'s own internal MODE-based fallback dead code
+    # in production (this is the only production call site, and it always
+    # supplies the 5th argument) — the real decision lived in this file,
+    # not in api.sh, even though api.sh's own fallback comment described
+    # itself as "the" decision point. Both are now the same single Core
+    # query: lib/core/deployment.sh's core_deployment_has_capability(),
+    # reading the already-resolved Deployment (core_resolve_deployment()
+    # runs earlier in this same panel_install() invocation — see below)
+    # rather than MODE/F_XHTTP_ENABLE directly.
+    local _api_xhttp_enable="0"
+    core_deployment_has_capability "XHTTP" && _api_xhttp_enable="1"
+    panel_setup_api "$SUPERADMIN_USER" "$SUPERADMIN_PASS" "$SELFSTEAL_DOMAIN" "$MODE" "$_api_xhttp_enable"
+
+    # ── Команда управления ───────────────────────────────────────
+    panel_install_mgmt_script "$PANEL_DOMAIN" "$COOKIE_KEY" "$COOKIE_VAL" "$MODE" "$WEB_SERVER"
+
+    panel_install_summary "$PANEL_DOMAIN" "$SUB_DOMAIN" "$SELFSTEAL_DOMAIN" "$SUPERADMIN_USER" "$SUPERADMIN_PASS" "$COOKIE_KEY" "$COOKIE_VAL"
+}

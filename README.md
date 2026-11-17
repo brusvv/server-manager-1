@@ -5,7 +5,7 @@
 > Модульная система установки и управления VPN-инфраструктурой на базе Remnawave + Hysteria2 + MTProxy.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/brusvv/server-manager/main/server-manager.sh | bash
+curl -fsSL https://raw.githubusercontent.com/stump3/server-manager/main/server-manager.sh | bash
 ```
 
 [![Docs](https://img.shields.io/badge/docs-интерактивные-3b82f6?style=flat-square)](https://stump3.github.io/server-manager/README.html)
@@ -72,13 +72,13 @@ server-manager/
 ## Быстрый старт
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/brusvv/server-manager/main/server-manager.sh | bash
+curl -fsSL https://raw.githubusercontent.com/stump3/server-manager/main/server-manager.sh | bash
 ```
 
 Или локально:
 
 ```bash
-git clone https://github.com/brusvv/server-manager
+git clone https://github.com/stump3/server-manager
 cd server-manager && bash server-manager.sh
 ```
 
@@ -345,7 +345,7 @@ ufw allow in from 172.16.0.0/12 to any port 8766
 ### Вручную — один модуль
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/brusvv/server-manager/main/lib/panel.sh" \
+curl -fsSL "https://raw.githubusercontent.com/stump3/server-manager/main/lib/panel.sh" \
     -o /root/lib/panel.sh
 ```
 

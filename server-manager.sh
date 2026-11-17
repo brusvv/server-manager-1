@@ -1,11 +1,11 @@
 #!/bin/bash
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  SERVER-MANAGER — VPN Server Management                         ║
-# ║  https://github.com/brusvv/server-manager                       ║
+# ║  https://github.com/stump3/server-manager                       ║
 # ╚══════════════════════════════════════════════════════════════════╝
 #
 # Использование:
-#   curl -fsSL https://raw.githubusercontent.com/brusvv/server-manager/main/server-manager.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/stump3/server-manager/main/server-manager.sh | bash
 #
 #   При первом запуске автоматически клонирует репозиторий в /root/server-manager/
 #   и перезапускается оттуда. Повторный запуск: server-manager
@@ -31,8 +31,8 @@ if [ -f "$_SOURCE_PATH" ]; then
     fi
 fi
 export SCRIPT_DIR
-REPO_RAW="https://raw.githubusercontent.com/brusvv/server-manager/main"
-REPO_URL="https://github.com/brusvv/server-manager"
+REPO_RAW="https://raw.githubusercontent.com/stump3/server-manager/main"
+REPO_URL="https://github.com/stump3/server-manager"
 INSTALL_DIR="/root/server-manager"
 
 # При запуске через curl | bash — SCRIPT_DIR обычно пустой.
@@ -78,11 +78,19 @@ fi
 # SHA256 контрольные суммы модулей — обновляйте при каждом релизе.
 # Оставьте "" чтобы отключить проверку для конкретного модуля.
 declare -A _MODULE_SHA256=(
+    ["core/config"]=""
+    ["core/deployment"]=""
+    ["core/runtime_component"]=""
+    ["core/adapter_webserver"]=""
+    ["core/adapter_reality"]=""
+    ["core/port_allocation"]=""
+    ["ui/output"]=""
     ["common"]=""
     ["panel"]=""
     ["telemt"]=""
     ["hysteria"]=""
     ["migrate"]=""
+    ["cli/router"]=""
 )
 
 _load_module() {
@@ -124,11 +132,19 @@ _sm_source_file() {
     rm -f "$tmp"
 }
 
+_load_module core/config
+_load_module core/deployment
+_load_module core/runtime_component
+_load_module core/adapter_webserver
+_load_module core/adapter_reality
+_load_module core/port_allocation
+_load_module ui/output
 _load_module common
 _load_module panel
 _load_module telemt
 _load_module hysteria
 _load_module migrate
+_load_module cli/router
 
 check_root
-main_menu
+cli_run "$@"

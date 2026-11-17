@@ -1,6 +1,47 @@
 # shellcheck shell=bash
 # Hysteria2: установка и переустановка
 
+ hy_run_official_installer() {
+    local _hy_script _rc=0
+    _hy_script=$(mktemp /tmp/hy2-install.XXXXXX.sh)
+    if ! curl -fsSL --max-time 30 https://get.hy2.sh/ -o "$_hy_script" 2>/dev/null; then
+        rm -f "$_hy_script"
+        die "Не удалось скачать установщик Hysteria2"
+    fi
+    [ -s "$_hy_script" ] || { rm -f "$_hy_script"; die "Установщик Hysteria2 пустой"; }
+    bash "$_hy_script" || _rc=$?
+    rm -f "$_hy_script"
+    [ $_rc -ne 0 ] && { die "Ошибка установки Hysteria2"; }
+    return 0
+}
+
+hysteria_update() {
+    header "Hysteria2 — Обновить"
+    hy_is_installed || { warn "Hysteria2 не установлена"; return 1; }
+
+    local before_ver backup_cfg=""
+    before_ver=$(get_hysteria_version 2>/dev/null || true)
+    [ -f "$HYSTERIA_CONFIG" ] && {
+        backup_cfg="/tmp/hysteria_config_backup_$(date +%Y%m%d_%H%M%S).yaml"
+        cp "$HYSTERIA_CONFIG" "$backup_cfg" && ok "Бэкап конфига: $backup_cfg"
+    }
+
+    info "Текущая версия: ${before_ver:-неизвестна}"
+    if ! confirm "Скачать и установить последнюю версию Hysteria2?" y; then
+        return 0
+    fi
+
+    systemctl stop "${HYSTERIA_SVC:-hysteria-server}" 2>/dev/null || true
+    hy_run_official_installer || return 1
+    [ -n "$backup_cfg" ] && [ -f "$backup_cfg" ] && cp "$backup_cfg" "$HYSTERIA_CONFIG"
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl restart "${HYSTERIA_SVC:-hysteria-server}" 2>/dev/null || true
+
+    local after_ver
+    after_ver=$(get_hysteria_version 2>/dev/null || true)
+    ok "Hysteria2 обновлена: ${before_ver:-?} → ${after_ver:-?}"
+}
+
 hysteria_install() {
     STEP_NUM=0; TOTAL_STEPS=5
     step "Установка / Переустановка Hysteria2"
@@ -22,13 +63,7 @@ hysteria_install() {
                 local backup_cfg="/tmp/hysteria_backup_$(date +%Y%m%d_%H%M%S).yaml"
                 cp "$HYSTERIA_CONFIG" "$backup_cfg" 2>/dev/null && info "Конфиг сохранён: $backup_cfg"
                 systemctl stop "$HYSTERIA_SVC" 2>/dev/null || true
-                local hy_script; hy_script=$(mktemp /tmp/hy2-install.XXXXXX.sh)
-                if ! curl -fsSL --max-time 30 https://get.hy2.sh/ -o "$hy_script" 2>/dev/null; then
-                    rm -f "$hy_script"; err "Не удалось скачать установщик Hysteria2"; return 1
-                fi
-                [ -s "$hy_script" ] || { rm -f "$hy_script"; err "Установщик Hysteria2 пустой"; return 1; }
-                local _rc=0; bash "$hy_script" || _rc=$?; rm -f "$hy_script"
-                [ $_rc -ne 0 ] && { err "Ошибка установки"; return 1; }
+                hy_run_official_installer || return 1
                 cp "$backup_cfg" "$HYSTERIA_CONFIG"
                 systemctl restart "$HYSTERIA_SVC"
                 ok "Hysteria2 переустановлена, конфиг восстановлен"
@@ -59,7 +94,7 @@ hysteria_install() {
     local server_ip resolved_a resolved_aaaa resolved_a_cf resolved_a_google
     local _placeholder_re='(^|\.)(example|your|test|sample|local|localhost)\.(com|net|org|lan|local)$'
     if [[ "$domain" =~ $_placeholder_re ]]; then
-        err "Похоже на шаблонный домен: ${domain}"
+        die "Похоже на шаблонный домен: ${domain}"
         warn "Укажите реальный FQDN с рабочей DNS-записью (например vpn.your-real-domain.tld)."
         return 1
     fi
@@ -204,26 +239,14 @@ hysteria_install() {
     # ── Бинарник + базовый конфиг (первичная установка) ───────────
     if ! hy_is_installed; then
         info "Установка бинарника Hysteria2..."
-        local _hy_script; _hy_script=$(mktemp /tmp/hy2-install.XXXXXX.sh)
-        if ! curl -fsSL --max-time 30 https://get.hy2.sh/ -o "$_hy_script" 2>/dev/null; then
-            rm -f "$_hy_script"; err "Не удалось скачать установщик Hysteria2"; return 1
-        fi
-        [ -s "$_hy_script" ] || { rm -f "$_hy_script"; err "Установщик Hysteria2 пустой"; return 1; }
-        local _rc=0; bash "$_hy_script" || _rc=$?; rm -f "$_hy_script"
-        [ $_rc -ne 0 ] && { err "Ошибка установки Hysteria2"; return 1; }
+        hy_run_official_installer || return 1
         ok "Бинарник Hysteria2 установлен"
     fi
 
     # ── Бинарник (устанавливаем только если не установлен) ────────
     if ! hy_is_installed; then
         info "Установка бинарника Hysteria2..."
-        local _hy_script; _hy_script=$(mktemp /tmp/hy2-install.XXXXXX.sh)
-        if ! curl -fsSL --max-time 30 https://get.hy2.sh/ -o "$_hy_script" 2>/dev/null; then
-            rm -f "$_hy_script"; err "Не удалось скачать установщик Hysteria2"; return 1
-        fi
-        [ -s "$_hy_script" ] || { rm -f "$_hy_script"; err "Установщик Hysteria2 пустой"; return 1; }
-        local _rc=0; bash "$_hy_script" || _rc=$?; rm -f "$_hy_script"
-        [ $_rc -ne 0 ] && { err "Ошибка установки Hysteria2"; return 1; }
+        hy_run_official_installer || return 1
         ok "Бинарник Hysteria2 установлен"
     fi
 
@@ -255,6 +278,22 @@ EOF
     local _users_db="/var/lib/hy-webhook/users.json"
     local _is_http_auth=false
     grep -q "type: http" "$HYSTERIA_CONFIG" 2>/dev/null && _is_http_auth=true
+
+    # ── UFW ────────────────────────────────────────────────────────
+    if command -v ufw &>/dev/null; then
+        ufw allow 22/tcp >/dev/null 2>&1
+        ufw allow 80/tcp >/dev/null 2>&1
+        if [ "${port_mode:-1}" = "2" ]; then
+            ufw allow "${port_hop_start}:${port_hop_end}/udp" >/dev/null 2>&1
+            ok "UFW: открыт диапазон ${port_hop_start}-${port_hop_end}/udp"
+        else
+            ufw allow "${port}/udp" >/dev/null 2>&1
+            ufw allow "${port}/tcp" >/dev/null 2>&1
+            ok "UFW: открыт ${port}/udp и ${port}/tcp"
+        fi
+        ufw --force enable >/dev/null 2>&1
+        ok "UFW: открыт 80/tcp для ACME HTTP-01"
+    fi
 
     if true; then
         systemctl enable "$HYSTERIA_SVC" 2>/dev/null || true
@@ -372,19 +411,123 @@ PYEOF2
     echo "$uri" >> "/root/hysteria-${dom}-users.txt"
     ok "URI сохранён: /root/hysteria-${dom}-users.txt"
 
-    # ── UFW ────────────────────────────────────────────────────────
-    if command -v ufw &>/dev/null; then
-        ufw allow 22/tcp >/dev/null 2>&1
-        if [ "${port_mode:-1}" = "2" ]; then
-            ufw allow "${port_hop_start}:${port_hop_end}/udp" >/dev/null 2>&1
-            ok "UFW: открыт диапазон ${port_hop_start}-${port_hop_end}/udp"
-        else
-            ufw allow "${port}/udp" >/dev/null 2>&1
-            ufw allow "${port}/tcp" >/dev/null 2>&1
-            ok "UFW: открыт ${port}/udp и ${port}/tcp"
+    # ── Сбор трафика (trafficStats) ──────────────────────────────
+    echo ""
+    echo -e "  ${WHITE}Сбор статистики трафика:${NC}"
+    echo -e "  ${GRAY}Позволяет видеть трафик по каждому пользователю${NC}"
+    echo -e "  ${GRAY}и агрегировать его с панелью Remnawave${NC}"
+    echo ""
+    local enable_traffic
+    read -rp "  Включить сбор трафика? (Y/n): " enable_traffic < /dev/tty
+    if [[ "${enable_traffic:-Y}" =~ ^[Yy]$ ]]; then
+        local traffic_secret=""
+        read -rp "  Секрет trafficStats (Enter — сгенерировать): " traffic_secret < /dev/tty
+        if [ -z "$traffic_secret" ]; then
+            traffic_secret=$(openssl rand -hex 16)
+            info "Сгенерирован секрет: $traffic_secret"
         fi
-        ufw --force enable >/dev/null 2>&1
+        # Убираем старую секцию trafficStats если была
+        python3 -c "
+import re
+with open('/etc/hysteria/config.yaml') as f: cfg = f.read()
+cfg = re.sub(r'\ntrafficStats:.*', '', cfg, flags=re.DOTALL)
+with open('/etc/hysteria/config.yaml', 'w') as f: f.write(cfg.rstrip())
+" 2>/dev/null || true
+        # Добавляем секцию
+        local _ts="$traffic_secret"
+        cat >> /etc/hysteria/config.yaml << TRAFFICEOF
+
+trafficStats:
+  listen: 127.0.0.1:9999
+  secret: ${_ts}
+TRAFFICEOF
+        systemctl restart "${HYSTERIA_SVC:-hysteria-server}" 2>/dev/null || true
+        ok "trafficStats включён: 127.0.0.1:9999"
+        info "Секрет: $traffic_secret"
+        info "Агрегация с Remnawave — настраивается через: Подписка → Интеграция с Remnawave"
+        # Сохраняем секрет в hy-webhook.env если он уже существует
+        if [ -f /etc/hy-webhook.env ]; then
+            sed -i '/^HY_TRAFFIC_SECRET=/d;/^HY_TRAFFIC_PORT=/d' /etc/hy-webhook.env
+            printf 'HY_TRAFFIC_SECRET=%s\nHY_TRAFFIC_PORT=9999\n' "$traffic_secret" >> /etc/hy-webhook.env
+            systemctl is-active --quiet hy-webhook 2>/dev/null && systemctl restart hy-webhook || true
+            ok "Секрет сохранён в /etc/hy-webhook.env"
+        fi
+    else
+        info "Сбор трафика пропущен"
     fi
+
+}
+
+# hy_ufw_cleanup_service_port — CONFIRMED DEFECT (lifecycle audit, UFW
+# inventory pass, HY2 install/uninstall symmetry): hysteria_uninstall()
+# below never removed the UFW rule(s) install.sh's own install path
+# opened (`ufw allow "${port}/udp"`+`"${port}/tcp"` for single-port mode,
+# or `ufw allow "${port_hop_start}:${port_hop_end}/udp"` for Port
+# Hopping mode) -- confirmed by direct reading of this whole function
+# (no `ufw` call anywhere in it before this fix) and reproduced against
+# a real ufw: a rule opened at install time was still present and
+# ALLOWing traffic after uninstall removed the binary/config/service
+# that used to listen on it -- the same "port open, nothing behind it"
+# class of gap already fixed elsewhere in this codebase for XHTTP's
+# public port (lib/panel/management.sh:panel_cleanup_xhttp_ufw_rules()).
+#
+# Unlike that XHTTP fix, HY2's own `ufw allow` calls (install.sh, above)
+# carry no `comment` tag at all, so there is no existing tag this
+# cleanup could key off via `ufw status numbered` the way the XHTTP fix
+# does. What IS available, and is this port's actual identity, is the
+# `listen:` line in $HYSTERIA_CONFIG itself -- so this reads that line
+# BEFORE hysteria_uninstall() deletes the config file, and deletes
+# exactly the port/range this specific install actually opened. Same
+# "read the value this component itself persisted, delete exactly that"
+# technique lib/telemt/menu.sh's own uninstall already uses for its own
+# port (greps the port out of its own config before deleting it) --
+# not a new invention, the established precedent for a rule with no
+# comment to match on.
+#
+# 22/tcp and 80/tcp are deliberately NOT touched here, same reasoning
+# already established for other host-baseline/ACME ports in this
+# codebase: 22/tcp is host-wide SSH access, unrelated to whether HY2
+# specifically is installed; 80/tcp here is Hysteria's own built-in ACME
+# HTTP-01 client's port and, like Caddy's own permanent ACME 80/tcp
+# rule (lib/panel/cert.sh), is also bare/uncommented, so there is no
+# way to prove THIS rule (vs. Caddy's, or certbot's own temporary one)
+# owns it -- deleting it blind risks exactly the ownership collision
+# Step C.4 exists to catch, for a port far more likely to be
+# legitimately shared by another co-located component than HY2's own
+# service port is. Per C.5: ownership of the bare 22/80 rules can't be
+# established here, so they are left as LEGACY/UNOWNED-equivalent,
+# untouched -- only the port(s)/range this function can prove are
+# HY2's own (parsed straight from HY2's own config, the moment before
+# that config is deleted) are removed.
+#
+# Parses BOTH real `listen:` shapes install.sh actually writes
+# (confirmed by direct reading of install.sh's listen_addr construction,
+# both IPv4 0.0.0.0 and IPv6 [::] forms):
+#   single port:  listen: 0.0.0.0:44444        (or [::]:44444)
+#   Port Hopping: listen: 0.0.0.0:20000-30000  (or [::]:20000-30000)
+# This is deliberately a fresh, self-contained parse rather than a call
+# to hy_get_port() (lib/hy2/core.sh): hy_get_port()'s own regex expects
+# a comma-separated `PORT,START-END` shape that install.sh never
+# actually writes (confirmed empirically: hy_get_port() returns empty
+# on the real dash-separated Port Hopping listen line install.sh
+# produces) -- a separate, pre-existing bug with its own further
+# downstream consumers (hy_menu_migrate()'s destination-side `ufw allow
+# ${hy_port}/...`, hysteria_publish_sub()'s URI port) that this pass
+# did not verify end-to-end and is NOT fixing here, to keep this change
+# to exactly the uninstall-cleanup gap Step C's HY2 task asked about.
+hy_ufw_cleanup_service_port() {
+    command -v ufw &>/dev/null || return 0
+    [ -f "$HYSTERIA_CONFIG" ] || return 0
+    local _listen _rest
+    _listen=$(grep -m1 -E '^[[:space:]]*listen:[[:space:]]*' "$HYSTERIA_CONFIG" 2>/dev/null) || return 0
+    _rest=$(printf '%s\n' "$_listen" | sed -E 's/^[[:space:]]*listen:[[:space:]]*//; s/[[:space:]]*(#.*)?$//; s/^["'"'"']//; s/["'"'"']$//')
+    if [[ "$_rest" =~ :([0-9]+)-([0-9]+)$ ]]; then
+        ufw delete allow "${BASH_REMATCH[1]}:${BASH_REMATCH[2]}/udp" >/dev/null 2>&1 || true
+    elif [[ "$_rest" =~ :([0-9]+)$ ]]; then
+        ufw delete allow "${BASH_REMATCH[1]}/udp" >/dev/null 2>&1 || true
+        ufw delete allow "${BASH_REMATCH[1]}/tcp" >/dev/null 2>&1 || true
+    fi
+    return 0
 }
 
 hysteria_uninstall() {
@@ -398,6 +541,12 @@ hysteria_uninstall() {
 
     systemctl stop    "${HYSTERIA_SVC:-hysteria-server}" 2>/dev/null || true
     systemctl disable "${HYSTERIA_SVC:-hysteria-server}" 2>/dev/null || true
+
+    # UFW: снимаем правило(а) именно того порта/диапазона, который был
+    # сконфигурирован (см. hy_ufw_cleanup_service_port() выше) -- ДО
+    # удаления конфига ниже, поскольку это единственный источник, откуда
+    # можно узнать, какой именно порт/диапазон открывал install.
+    hy_ufw_cleanup_service_port
 
     # Официальный деинсталлятор (если доступен)
     if command -v hysteria &>/dev/null; then

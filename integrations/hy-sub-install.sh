@@ -51,7 +51,7 @@ trap 'cleanup $LINENO "$BASH_COMMAND"' ERR
 # ── Проверки ──────────────────────────────────────────────────────
 [ "$(id -u)" -ne 0 ] && err "Запустите от root"
 [ -d /opt/remnawave ]            || err "Remnawave не установлена"
-[ -f /etc/hysteria/config.yaml ] || err "Hysteria2 не установлена"
+[ -f "${HYSTERIA_CONFIG:-/etc/hysteria/config.yaml}" ] || err "Hysteria2 не установлена"
 
 # ── Идемпотентность ───────────────────────────────────────────────
 DO_WEBHOOK=true
@@ -84,8 +84,8 @@ fi
 # ── Параметры ─────────────────────────────────────────────────────
 step "Конфигурация"
 
-HY_DOMAIN=$(grep -A2 'domains:' /etc/hysteria/config.yaml | grep -- '- ' | head -1 | tr -d ' -')
-LISTEN_LINE=$(grep '^listen:' /etc/hysteria/config.yaml | head -1)
+HY_DOMAIN=$(grep -A2 'domains:' "${HYSTERIA_CONFIG:-/etc/hysteria/config.yaml}" | grep -- '- ' | head -1 | tr -d ' -')
+LISTEN_LINE=$(grep '^listen:' "${HYSTERIA_CONFIG:-/etc/hysteria/config.yaml}" | head -1)
 SUB_DOMAIN=$(grep "^SUB_PUBLIC_DOMAIN=" /opt/remnawave/.env | cut -d= -f2 | tr -d '"' | cut -d'/' -f1)
 
 # Парсим порт — поддерживаем форматы:
@@ -266,10 +266,10 @@ _HY_NAME_ESC=$(printf '%s' "${HY_NAME}" | sed "s/'/'\\''/g")
 
 cat > "$SECRETS_FILE" << SECRETEOF
 WEBHOOK_SECRET=${WEBHOOK_SECRET}
-HYSTERIA_CONFIG=/etc/hysteria/config.yaml
+HYSTERIA_CONFIG=${HYSTERIA_CONFIG:-/etc/hysteria/config.yaml}
 USERS_DB=/var/lib/hy-webhook/users.json
 LISTEN_PORT=8766
-HYSTERIA_SVC=hysteria-server
+HYSTERIA_SVC=${HYSTERIA_SVC:-hysteria-server}
 REMNAWAVE_URL=http://127.0.0.1:3000
 REMNAWAVE_TOKEN=${REMNAWAVE_API_TOKEN:-}
 HY_DOMAIN=${HY_DOMAIN}
@@ -432,6 +432,93 @@ info "WEBHOOK_URL установлен: http://${WEBHOOK_GATEWAY_IP}:8766/webhoo
 cd /opt/remnawave && docker compose up -d --force-recreate remnawave >/dev/null 2>&1
 ok "Remnawave перезапущена"
 
+# ── Агрегация трафика Hysteria2 → Remnawave ──────────────────────
+# CONFIRMED BUG FIX: this whole section used to run as sequential
+# top-level script code (no enclosing function) while its INSERT
+# helper var was declared "local _HY_NODE_ROW" -- `local` outside a
+# function is a hard bash error ("local: can only be used in a
+# function"), which aborted every install at exactly this step once a
+# user answered "y" to traffic aggregation. None of this section's
+# variables (_TRAFFIC_SECRET, enable_agg, _HY_NODE_ADDRESS,
+# _HY_NODE_ID, _HY_NODE_UUID, _HY_NODE_ROW) are read anywhere after it
+# -- it was always meant to be self-contained -- so it is wrapped in
+# its own function here (restoring the scope the original `local`
+# already assumed existed) rather than dropping `local` to silence
+# the error.
+hy_setup_traffic_aggregation() {
+    local _TRAFFIC_SECRET enable_agg _HY_NODE_ADDRESS _HY_NODE_ID _HY_NODE_UUID _HY_NODE_ROW
+
+    echo ""
+    echo -e "  ${BOLD}Агрегация трафика Hysteria2 → Remnawave${NC}"
+    echo -e "  ${GRAY}Трафик пользователей Hysteria2 будет виден в панели${NC}"
+    echo ""
+
+    # Проверяем что trafficStats настроен в Hysteria2
+    if grep -q "^trafficStats:" /etc/hysteria/config.yaml 2>/dev/null; then
+        _TRAFFIC_SECRET=$(grep -A3 "^trafficStats:" /etc/hysteria/config.yaml | grep "secret:" | awk '{print $2}' || true)
+        echo -e "  ${GREEN}●${NC} trafficStats обнаружен в конфиге Hysteria2"
+        echo ""
+        enable_agg=""
+        read -rp "  Включить агрегацию трафика с панелью? (Y/n): " enable_agg < /dev/tty
+        if [[ "${enable_agg:-Y}" =~ ^[Yy]$ ]]; then
+            # psycopg2
+            if ! python3 -c "import psycopg2" 2>/dev/null; then
+                info "Устанавливаем psycopg2..."
+                pip3 install psycopg2-binary --break-system-packages 2>/dev/null                     || apt-get install -y python3-psycopg2 2>/dev/null                     || warn "Не удалось установить psycopg2 — установите вручную: pip install psycopg2-binary"
+            fi
+            # Добавляем переменные в hy-webhook.env (удаляем старые)
+            sed -i '/^HY_TRAFFIC_SECRET=/d;/^HY_TRAFFIC_PORT=/d;/^DATABASE_URL=/d;/^TRAFFIC_POLL_INTERVAL=/d;/^HY_NODE_ID=/d;/^HY_NODE_UUID=/d;/^ONLINE_POLL_INTERVAL=/d' /etc/hy-webhook.env
+
+            # Создаём виртуальную ноду Hysteria2 в Remnawave если не существует
+            _HY_NODE_ADDRESS="hysteria2://${HY_DOMAIN}:${MAIN_PORT}"
+            _HY_NODE_ID=""
+            if command -v docker &>/dev/null && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "remnawave-db"; then
+                # Вставляем ноду, при конфликте по address — просто получаем существующий id
+                _HY_NODE_ROW=$(docker exec remnawave-db psql -U postgres postgres -tAc "
+INSERT INTO nodes (name, address, is_connected, is_connecting, is_disabled,
+    is_traffic_tracking_active, country_code, consumption_multiplier)
+VALUES ('Hysteria2', '${_HY_NODE_ADDRESS}', false, false, false, true, 'XX', 1000000000)
+ON CONFLICT (address) DO UPDATE SET name = EXCLUDED.name
+RETURNING id, uuid;" 2>/dev/null | tr -d ' ')
+                _HY_NODE_ID=$(echo "$_HY_NODE_ROW" | cut -d'|' -f1 | tr -d ' ')
+                _HY_NODE_UUID=$(echo "$_HY_NODE_ROW" | cut -d'|' -f2 | tr -d ' ')
+                if [ -n "$_HY_NODE_ID" ]; then
+                    ok "Нода Hysteria2 в Remnawave: id=${_HY_NODE_ID}, uuid=${_HY_NODE_UUID}"
+                else
+                    warn "Не удалось создать ноду в БД — HY_NODE_ID не будет задан"
+                fi
+            else
+                warn "remnawave-db недоступен — HY_NODE_ID не будет задан"
+            fi
+
+            cat >> /etc/hy-webhook.env << TRAFFICEOF
+HY_TRAFFIC_SECRET=${_TRAFFIC_SECRET}
+HY_TRAFFIC_PORT=9999
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:6767/postgres
+TRAFFIC_POLL_INTERVAL=60
+TRAFFICEOF
+            # HY_NODE_ID — только если нода создана успешно
+            if [ -n "$_HY_NODE_ID" ]; then
+                echo "HY_NODE_ID=${_HY_NODE_ID}" >> /etc/hy-webhook.env
+                [ -n "$_HY_NODE_UUID" ] && echo "HY_NODE_UUID=${_HY_NODE_UUID}" >> /etc/hy-webhook.env
+                echo "ONLINE_POLL_INTERVAL=30" >> /etc/hy-webhook.env
+            fi
+            systemctl restart hy-webhook
+            sleep 2
+            ok "Агрегация трафика настроена"
+            info "Трафик обновляется каждые 60 секунд"
+            info "Проверить: journalctl -u hy-webhook -f"
+        else
+            info "Агрегация пропущена"
+        fi
+    else
+        echo -e "  ${GRAY}○${NC} trafficStats не найден в конфиге Hysteria2"
+        echo -e "  ${GRAY}  Включите через: Hysteria2 → Установка, затем вернитесь сюда${NC}"
+        info "Агрегация пропущена"
+    fi
+}
+hy_setup_traffic_aggregation
+
 fi # DO_WEBHOOK
 
 
@@ -452,12 +539,21 @@ INJECTOR_URL="https://github.com/stump3/server-manager/releases/latest/download/
 
 mkdir -p "$INJECTOR_DIR"
 
+# ── Системный пользователь sub-injector ──────────────────────────
+if ! id sub-injector >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin sub-injector
+    ok "Создан системный пользователь sub-injector"
+else
+    info "Системный пользователь sub-injector уже существует"
+fi
+
 # ── Скачиваем бинарник из releases stump3/server-manager ─────────
 info "Скачиваем sub-injector..."
 if curl -fsSL "$INJECTOR_URL" -o "${INJECTOR_BIN}.new" 2>/dev/null; then
     systemctl stop remna-sub-injector 2>/dev/null || true
     mv "${INJECTOR_BIN}.new" "$INJECTOR_BIN"
     chmod +x "$INJECTOR_BIN"
+    chown sub-injector:sub-injector "$INJECTOR_BIN"
     ok "sub-injector установлен: $INJECTOR_BIN"
 else
     warn "Бинарник недоступен — собираем из sub-injector/ репозитория"
@@ -471,7 +567,7 @@ else
     fi
     if ! command -v cargo &>/dev/null; then
         info "Устанавливаем зависимости сборки (gcc, pkg-config, libssl-dev)..."
-        apt-get -o DPkg::Lock::Timeout=300 install -y -q build-essential pkg-config libssl-dev 2>/dev/null             || { warn "apt не сработал — пробуем продолжить без него"; }
+        apt-get install -y -q build-essential pkg-config libssl-dev 2>/dev/null             || { warn "apt не сработал — пробуем продолжить без него"; }
         info "Устанавливаем Rust (потребуется 2-3 минуты)..."
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path             || err "Не удалось установить Rust"
         # shellcheck source=/dev/null
@@ -481,7 +577,7 @@ else
     # build-essential нужен даже если cargo уже есть (линкер cc)
     if ! command -v cc &>/dev/null; then
         info "Устанавливаем build-essential (линкер cc не найден)..."
-        apt-get -o DPkg::Lock::Timeout=300 install -y -q build-essential 2>/dev/null || true
+        apt-get install -y -q build-essential 2>/dev/null || true
     fi
     command -v cargo &>/dev/null || err "cargo не найден после установки Rust"
 
@@ -508,6 +604,7 @@ else
     systemctl stop remna-sub-injector 2>/dev/null || true
     cp target/release/sub-injector "$INJECTOR_BIN"
     chmod +x "$INJECTOR_BIN"
+    chown sub-injector:sub-injector "$INJECTOR_BIN"
     ok "sub-injector собран из исходников"
 fi
 
@@ -527,6 +624,8 @@ TOMLEOF
     ok "Конфиг создан: $INJECTOR_CFG"
 fi
 
+chown sub-injector:sub-injector "$INJECTOR_CFG"
+
 # ── Systemd ───────────────────────────────────────────────────────
 cat > /etc/systemd/system/remna-sub-injector.service << 'SVCEOF'
 [Unit]
@@ -535,6 +634,8 @@ After=network.target hy-webhook.service
 
 [Service]
 Type=simple
+User=sub-injector
+Group=sub-injector
 WorkingDirectory=/opt/remna-sub-injector
 ExecStart=/opt/remna-sub-injector/sub-injector /opt/remna-sub-injector/config.toml
 Restart=always
@@ -545,6 +646,36 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 SVCEOF
+
+# ── Systemd hardening ────────────────────────────────────────────
+mkdir -p /etc/systemd/system/remna-sub-injector.service.d
+
+cat > /etc/systemd/system/remna-sub-injector.service.d/hardening.conf << 'HARDEOF'
+[Service]
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+ProtectProc=invisible
+ProcSubset=pid
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+CapabilityBoundingSet=
+HARDEOF
+
+systemd-analyze verify /etc/systemd/system/remna-sub-injector.service     || err "Systemd-конфигурация sub-injector не прошла проверку"
 
 systemctl daemon-reload
 systemctl enable --now remna-sub-injector

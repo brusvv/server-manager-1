@@ -52,6 +52,26 @@ DEBUG_LOG       = os.environ.get("DEBUG_LOG", "")       # "1" для расши�
 PROXY_PORT      = int(os.environ.get("PROXY_PORT", "3020"))
 UPSTREAM_URL    = os.environ.get("UPSTREAM_URL", "http://127.0.0.1:3010")
 
+# ── Traffic Stats + Kick ──────────────────────────────────────────
+HY_TRAFFIC_PORT   = os.environ.get("HY_TRAFFIC_PORT", "9999")
+HY_TRAFFIC_URL    = f"http://127.0.0.1:{HY_TRAFFIC_PORT}/traffic?clear=1"
+HY_KICK_URL       = f"http://127.0.0.1:{HY_TRAFFIC_PORT}/kick"
+HY_TRAFFIC_SECRET = os.environ.get("HY_TRAFFIC_SECRET", "")
+DATABASE_URL      = os.environ.get("DATABASE_URL", "")
+TRAFFIC_POLL_INTERVAL = int(os.environ.get("TRAFFIC_POLL_INTERVAL", "60"))
+PENDING_FILE      = "/var/lib/hy-webhook/traffic-pending.json"
+
+# Виртуальная нода Hysteria2 в Remnawave (id из таблицы nodes).
+# Задать через /etc/hy-webhook.env: HY_NODE_ID=2
+# Если не задан — запись в nodes и nodes_user_usage_history отключена.
+_hy_node_id_raw = os.environ.get("HY_NODE_ID")
+HY_NODE_ID: int | None = int(_hy_node_id_raw) if _hy_node_id_raw else None
+HY_NODE_UUID = os.environ.get("HY_NODE_UUID", "")  # для last_connected_node_uuid
+
+# Интервал обновления онлайн-статуса (независим от traffic poller)
+ONLINE_POLL_INTERVAL = int(os.environ.get("ONLINE_POLL_INTERVAL", "30"))
+HY_ONLINE_URL        = f"http://127.0.0.1:{HY_TRAFFIC_PORT}/online"
+
 # User-Agent паттерны для инъекции
 INJECT_UA_PATTERNS = [
     p.strip().lower()
@@ -285,6 +305,176 @@ def upstream_get(url: str, headers: dict, timeout: int = 15):
         log.warning(f"upstream error {url}: {e}")
         return 502, {}, b"Bad Gateway"
 
+
+# ── Traffic Stats + Kick ──────────────────────────────────────────
+
+def fetch_hy_traffic() -> dict:
+    req = urllib.request.Request(HY_TRAFFIC_URL)
+    if HY_TRAFFIC_SECRET:
+        req.add_header("Authorization", HY_TRAFFIC_SECRET)
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.loads(r.read())
+
+def kick_hysteria_user(username: str):
+    if not HY_TRAFFIC_SECRET:
+        return
+    try:
+        body = json.dumps([username]).encode()
+        req = urllib.request.Request(
+            HY_KICK_URL, data=body,
+            headers={"Content-Type": "application/json",
+                     "Authorization": HY_TRAFFIC_SECRET},
+            method="POST"
+        )
+        urllib.request.urlopen(req, timeout=5)
+        log.info(f"Kicked: {username}")
+    except Exception as e:
+        log.warning(f"Kick failed for {username}: {e}")
+
+def write_traffic_to_db(deltas: dict):
+    if not deltas or not DATABASE_URL:
+        return
+    try:
+        import psycopg2
+    except ImportError:
+        log.error("psycopg2 не установлен: pip install psycopg2-binary --break-system-packages")
+        return
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn, conn.cursor() as cur:
+            total_delta = 0
+            for username, delta in deltas.items():
+                if delta <= 0:
+                    continue
+                total_delta += delta
+                # Трафик пользователя
+                # user_traffic — всегда
+                cur.execute("""
+                    UPDATE user_traffic ut
+                    SET used_traffic_bytes          = ut.used_traffic_bytes + %s,
+                        lifetime_used_traffic_bytes = ut.lifetime_used_traffic_bytes + %s
+                    FROM users u
+                    WHERE ut.id = u.id AND u.username = %s
+                """, (delta, delta, username))
+                # Еженедельный разрез по ноде (график в панели)
+                # nodes_user_usage_history — только если нода задана
+                if HY_NODE_ID is not None:
+                    cur.execute("""
+                        INSERT INTO nodes_user_usage_history
+                            (node_id, user_id, total_bytes, created_at, updated_at)
+                        SELECT %s, u.id, %s, CURRENT_DATE, now()
+                        FROM users u WHERE u.username = %s
+                        ON CONFLICT (node_id, created_at, user_id)
+                        DO UPDATE SET
+                            total_bytes = nodes_user_usage_history.total_bytes + EXCLUDED.total_bytes,
+                            updated_at  = now()
+                    """, (HY_NODE_ID, delta, username))
+            # Общий счетчик ноды
+            # nodes.traffic_used_bytes — одним запросом после цикла
+            if HY_NODE_ID is not None and total_delta > 0:
+                cur.execute("""
+                    UPDATE nodes
+                    SET traffic_used_bytes = COALESCE(traffic_used_bytes, 0) + %s
+                    WHERE id = %s
+                """, (total_delta, HY_NODE_ID))
+        conn.close()
+        log.info(f"Traffic записан в БД: {len(deltas)} пользователей")
+    except Exception as e:
+        log.error(f"DB write error: {e}")
+
+def _save_pending(deltas: dict):
+    os.makedirs(os.path.dirname(PENDING_FILE), exist_ok=True)
+    with open(PENDING_FILE, "w") as f:
+        json.dump(deltas, f)
+
+def _load_clear_pending() -> dict:
+    try:
+        with open(PENDING_FILE) as f:
+            d = json.load(f)
+        os.remove(PENDING_FILE)
+        return d
+    except FileNotFoundError:
+        return {}
+
+def fetch_hy_online() -> dict:
+    """GET /online → {username: connections_count}"""
+    req = urllib.request.Request(HY_ONLINE_URL)
+    if HY_TRAFFIC_SECRET:
+        req.add_header("Authorization", HY_TRAFFIC_SECRET)
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.loads(r.read())
+
+def update_online_status(online_users: dict):
+    """Обновляет online_at и last_connected_node_uuid для онлайн-пользователей."""
+    if not online_users or not DATABASE_URL:
+        return
+    try:
+        import psycopg2
+    except ImportError:
+        return
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn, conn.cursor() as cur:
+            for username in online_users:
+                if HY_NODE_UUID:
+                    cur.execute("""
+                        UPDATE user_traffic ut
+                        SET online_at                = now(),
+                            last_connected_node_uuid = %s
+                        FROM users u
+                        WHERE ut.id = u.id AND u.username = %s
+                    """, (HY_NODE_UUID, username))
+                else:
+                    cur.execute("""
+                        UPDATE user_traffic ut
+                        SET online_at = now()
+                        FROM users u
+                        WHERE ut.id = u.id AND u.username = %s
+                    """, (username,))
+        conn.close()
+        log.debug(f"Online статус обновлён: {list(online_users.keys())}")
+    except Exception as e:
+        log.warning(f"Online status update error: {e}")
+
+def online_poller():
+    """Фоновый поток: обновляет online_at каждые ONLINE_POLL_INTERVAL секунд."""
+    if not DATABASE_URL or not HY_TRAFFIC_SECRET:
+        log.info("Online poller отключён (DATABASE_URL или HY_TRAFFIC_SECRET не заданы)")
+        return
+    log.info(f"Online poller запущен, интервал {ONLINE_POLL_INTERVAL}с")
+    while True:
+        time.sleep(ONLINE_POLL_INTERVAL)
+        try:
+            online = fetch_hy_online()
+            if online:
+                update_online_status(online)
+        except Exception as e:
+            log.debug(f"Online poller: {e}")
+
+def traffic_poller():
+    if not DATABASE_URL:
+        log.info("DATABASE_URL не задан — учёт трафика отключён")
+        return
+    pending = _load_clear_pending()
+    if pending:
+        log.info(f"Накатываем pending-трафик: {pending}")
+        write_traffic_to_db(pending)
+    log.info(f"Traffic poller запущен, интервал {TRAFFIC_POLL_INTERVAL}с")
+    while True:
+        time.sleep(TRAFFIC_POLL_INTERVAL)
+        try:
+            raw = fetch_hy_traffic()
+            deltas = {u: v.get("tx", 0) + v.get("rx", 0) for u, v in raw.items()}
+            if deltas:
+                _save_pending(deltas)
+                write_traffic_to_db(deltas)
+                try:
+                    os.remove(PENDING_FILE)
+                except FileNotFoundError:
+                    pass
+        except Exception as e:
+            log.warning(f"Traffic poller: {e}")
+
 # ── Обработка событий вебхука ─────────────────────────────────────
 
 def handle_user_created(username, users):
@@ -340,6 +530,9 @@ def process_event(payload):
         # HTTP auth mode: hysteria спрашивает /auth при каждом подключении
         # перезапуск не нужен — пользователь появится автоматически
         update_hysteria_config(users)  # обновляем на случай fallback к userpass
+        # Kick при отключении — разрываем активные сессии немедленно
+        if event in ("user.deleted", "user.disabled", "user.expired"):
+            kick_hysteria_user(username)
 
 # ── Webhook сервер (:8766) ──────────────────────────────────────
 
@@ -487,6 +680,10 @@ def main():
     if users:
         log.info(f"Загружено {len(users)} пользователей")
         update_hysteria_config(users)
+
+    # Traffic poller (отключается если DATABASE_URL не задан)
+    threading.Thread(target=traffic_poller, daemon=True).start()
+    threading.Thread(target=online_poller, daemon=True).start()
 
     # Proxy в отдельном потоке (отключается если PROXY_PORT=0)
     if PROXY_PORT > 0:
