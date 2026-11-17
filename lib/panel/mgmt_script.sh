@@ -128,6 +128,15 @@ do_update() {
     cd "$DIR"
     _warn "Перед обновлением будет создан бэкап БД и конфигов."
     do_backup
+    if [ "${BACKUP_DB_OK:-1}" != "1" ]; then
+        # Без бэкапа БД откатиться после неудачного обновления будет не к чему.
+        # Без терминала (cron и т.п.) ответа не получить — считаем это отказом.
+        local _go=""
+        _warn "Бэкап БД не создан."
+        printf '  Продолжить обновление без бэкапа БД? [y/N]: ' >&2
+        { read -r _go < /dev/tty; } 2>/dev/null || _go=""
+        case "$_go" in y|Y) ;; *) _info "Обновление отменено"; return 1 ;; esac
+    fi
     _migrate_env_for_remnawave_v2 || return 1
     docker compose pull>/dev/null 2>&1 & _spinner $! "Загрузка..."
     docker compose down>/dev/null 2>&1 & _spinner $! "Остановка..."
@@ -148,29 +157,43 @@ do_ssl() {
     fi
 }
 do_backup() {
-    local ts b ws_cfg pg_user pg_db dump dump_err cfg_tar cfg_err old_umask
-    ts=$(date +%Y%m%d_%H%M%S); b="$DIR/backups"; mkdir -p "$b"; cd "$DIR"
-    [ -f "$DIR/Caddyfile" ] && ws_cfg="$DIR/Caddyfile" || ws_cfg="$DIR/nginx.conf"
-    # Дампы и конфиги содержат секреты (.env, данные БД) — не оставляем их
-    # читаемыми для всех. umask действует только на файлы, созданные ниже.
+    local ts b ws_cfg pg_user pg_db dump dump_err cfg_tar cfg_err old_umask pat n f
+    BACKUP_DB_OK=0
+    ts=$(date +%Y%m%d_%H%M%S)
+    # Бэкапы хранятся вне каталога панели: внешние архиваторы не будут
+    # включать старые бэкапы, а восстановление файлов не удалит их.
+    b="${RP_BACKUP_DIR:-${DIR%/}-backups}"
     old_umask=$(umask); umask 077
-    # Учётные данные БД — из .env (их пишет установщик); при отсутствии —
-    # значения установщика по умолчанию.
-    pg_user=$(grep -m1 '^POSTGRES_USER=' "$DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\r")
-    pg_db=$(grep -m1 '^POSTGRES_DB=' "$DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\r")
+    # Однократно переносим прежний каталог и сохраняем совместимый путь.
+    if [ -d "$DIR/backups" ] && [ ! -L "$DIR/backups" ] && [ ! -e "$b" ]; then
+        mv "$DIR/backups" "$b" && ln -s "$b" "$DIR/backups"
+    fi
+    mkdir -p "$b"; chmod 700 "$b" 2>/dev/null || true; cd "$DIR"
+    [ -f "$DIR/Caddyfile" ] && ws_cfg="$DIR/Caddyfile" || ws_cfg="$DIR/nginx.conf"
+    pg_user=$(grep -m1 '^POSTGRES_USER=' "$DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\\r")
+    pg_db=$(grep -m1 '^POSTGRES_DB=' "$DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\\r")
     pg_user="${pg_user:-postgres}"; pg_db="${pg_db:-postgres}"
     dump="$b/db_$ts.sql"; dump_err="$b/db_$ts.err"
+    # Успех требует кода 0, непустого файла и завершающего маркера pg_dump.
     if docker compose exec -T remnawave-db pg_dump -U "$pg_user" "$pg_db" >"$dump" 2>"$dump_err" \
-        && [ -s "$dump" ]; then
+        && [ -s "$dump" ] && tail -n 10 "$dump" | grep -q 'PostgreSQL database dump complete'; then
+        BACKUP_DB_OK=1
         _ok "БД → $dump"; rm -f "$dump_err"
+        ( cd "$b" && sha256sum "db_$ts.sql" > "db_$ts.sql.sha256" ) 2>/dev/null || true
     else
         _warn "Ошибка бэкапа БД"
-        [ -s "$dump_err" ] && sed 's/^/    pg_dump: /' "$dump_err" >&2
+        if [ -s "$dump_err" ]; then
+            sed 's/^/    pg_dump: /' "$dump_err" >&2
+        elif [ -s "$dump" ]; then
+            echo "    pg_dump: дамп неполный (нет завершающей строки)" >&2
+        fi
         rm -f "$dump" "$dump_err"
     fi
     cfg_tar="$b/configs_$ts.tar.gz"; cfg_err="$b/configs_$ts.err"
-    if tar -czf "$cfg_tar" "$DIR/.env" "$DIR/docker-compose.yml" "$ws_cfg" 2>"$cfg_err"; then
+    if tar -czf "$cfg_tar" "$DIR/.env" "$DIR/docker-compose.yml" "$ws_cfg" 2>"$cfg_err" \
+        && tar -tzf "$cfg_tar" >/dev/null 2>&1; then
         _ok "Конфиги → $cfg_tar"
+        ( cd "$b" && sha256sum "configs_$ts.tar.gz" > "configs_$ts.tar.gz.sha256" ) 2>/dev/null || true
     else
         _warn "Ошибка бэкапа конфигов"
         [ -s "$cfg_err" ] && sed 's/^/    tar: /' "$cfg_err" >&2
@@ -178,7 +201,16 @@ do_backup() {
     fi
     rm -f "$cfg_err"
     umask "$old_umask"
-    find "$b" -maxdepth 1 -type f \\( -name 'db_*.sql' -o -name 'db_*.err' -o -name 'configs_*.tar.gz' \\) -mtime +7 -delete 2>/dev/null||true
+    # Сохраняем три последних архива каждого типа независимо от возраста.
+    for pat in 'db_*.sql' 'configs_*.tar.gz'; do
+        n=0
+        while IFS= read -r f; do
+            n=$((n+1)); [ "$n" -le 3 ] && continue
+            [ -n "$(find "$f" -maxdepth 0 -mtime +7 2>/dev/null)" ] && rm -f "$f" "$f.sha256"
+        done < <(find "$b" -maxdepth 1 -type f -name "$pat" -printf '%T@ %p\\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
+    done
+    find "$b" -maxdepth 1 -type f -name 'db_*.err' -mtime +7 -delete 2>/dev/null || true
+    return 0
 }
 do_health() {
     local ws; ws=$(_detect_ws)
