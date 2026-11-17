@@ -160,21 +160,28 @@ do_backup() {
     local ts b ws_cfg pg_user pg_db dump dump_err cfg_tar cfg_err old_umask pat n f
     BACKUP_DB_OK=0
     ts=$(date +%Y%m%d_%H%M%S)
-    # Бэкапы хранятся вне каталога панели: внешние архиваторы не будут
-    # включать старые бэкапы, а восстановление файлов не удалит их.
+    # Бэкапы лежат ВНЕ каталога панели: иначе внешние инструменты, которые
+    # упаковывают весь $DIR (backup-restore), клали бы в каждый архив все прежние
+    # бэкапы, а их восстановление «только файлы» (rm -rf $DIR) стирало бы их.
     b="${RP_BACKUP_DIR:-${DIR%/}-backups}"
+    # Дампы и конфиги содержат секреты (.env, данные БД) — не оставляем их
+    # читаемыми для всех. umask действует только на файлы, созданные ниже.
     old_umask=$(umask); umask 077
-    # Однократно переносим прежний каталог и сохраняем совместимый путь.
+    # Прежнее расположение ($DIR/backups): переносим один раз; старый путь
+    # остаётся рабочим как симлинк.
     if [ -d "$DIR/backups" ] && [ ! -L "$DIR/backups" ] && [ ! -e "$b" ]; then
         mv "$DIR/backups" "$b" && ln -s "$b" "$DIR/backups"
     fi
     mkdir -p "$b"; chmod 700 "$b" 2>/dev/null || true; cd "$DIR"
     [ -f "$DIR/Caddyfile" ] && ws_cfg="$DIR/Caddyfile" || ws_cfg="$DIR/nginx.conf"
-    pg_user=$(grep -m1 '^POSTGRES_USER=' "$DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\\r")
-    pg_db=$(grep -m1 '^POSTGRES_DB=' "$DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\\r")
+    # Учётные данные БД — из .env (их пишет установщик); при отсутствии —
+    # значения установщика по умолчанию.
+    pg_user=$(grep -m1 '^POSTGRES_USER=' "$DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\r")
+    pg_db=$(grep -m1 '^POSTGRES_DB=' "$DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\r")
     pg_user="${pg_user:-postgres}"; pg_db="${pg_db:-postgres}"
     dump="$b/db_$ts.sql"; dump_err="$b/db_$ts.err"
-    # Успех требует кода 0, непустого файла и завершающего маркера pg_dump.
+    # Успех = код 0 И непустой файл И завершающая строка pg_dump (обрезанный
+    # дамп её не содержит): пустой или неполный дамп — это не бэкап.
     if docker compose exec -T remnawave-db pg_dump -U "$pg_user" "$pg_db" >"$dump" 2>"$dump_err" \
         && [ -s "$dump" ] && tail -n 10 "$dump" | grep -q 'PostgreSQL database dump complete'; then
         BACKUP_DB_OK=1
@@ -190,6 +197,7 @@ do_backup() {
         rm -f "$dump" "$dump_err"
     fi
     cfg_tar="$b/configs_$ts.tar.gz"; cfg_err="$b/configs_$ts.err"
+    # Архив сразу перечитываем: нечитаемый архив бэкапом не считается.
     if tar -czf "$cfg_tar" "$DIR/.env" "$DIR/docker-compose.yml" "$ws_cfg" 2>"$cfg_err" \
         && tar -tzf "$cfg_tar" >/dev/null 2>&1; then
         _ok "Конфиги → $cfg_tar"
@@ -197,11 +205,11 @@ do_backup() {
     else
         _warn "Ошибка бэкапа конфигов"
         [ -s "$cfg_err" ] && sed 's/^/    tar: /' "$cfg_err" >&2
-        rm -f "$cfg_tar"
     fi
     rm -f "$cfg_err"
     umask "$old_umask"
-    # Сохраняем три последних архива каждого типа независимо от возраста.
+    # Чистка: только собственные файлы, старше 7 дней, и ВСЕГДА оставляем три
+    # самых новых каждого вида — иначе неделя неудачных бэкапов стёрла бы последние рабочие.
     for pat in 'db_*.sql' 'configs_*.tar.gz'; do
         n=0
         while IFS= read -r f; do
