@@ -69,7 +69,7 @@ ufw allow 22/tcp  >/dev/null 2>&1 || true
 ufw allow ${hy_port}/udp >/dev/null 2>&1 || true
 ufw allow ${hy_port}/tcp >/dev/null 2>&1 || true
 ufw --force enable >/dev/null 2>&1 || true
-apt-get install -y qrencode >/dev/null 2>&1 || true
+apt-get -o DPkg::Lock::Timeout=300 install -y qrencode >/dev/null 2>&1 || true
 systemctl daemon-reload
 systemctl enable --now hysteria-server
 REMOTE
