@@ -31,8 +31,13 @@ if [ -f "$_SOURCE_PATH" ]; then
     fi
 fi
 export SCRIPT_DIR
-REPO_RAW="https://raw.githubusercontent.com/stump3/server-manager/main"
-REPO_URL="https://github.com/stump3/server-manager"
+# Репозиторий и ветка должны совпадать с теми, откуда загружен bootstrap.
+# Иначе curl | bash скачает сам загрузчик из форка, а модули — из upstream.
+REPO_OWNER="brusvv"
+REPO_NAME="server-manager-1"
+REPO_BRANCH="sync/upstream-variant-f-j"
+REPO_RAW="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
+REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
 INSTALL_DIR="/root/server-manager"
 
 # При запуске через curl | bash — SCRIPT_DIR обычно пустой.
@@ -53,10 +58,24 @@ if [ -z "$SCRIPT_DIR" ]; then
     echo "  Первый запуск — клонируем репозиторий в ${INSTALL_DIR}..."
     if [ -d "$INSTALL_DIR/.git" ]; then
         echo "  Репозиторий уже существует, обновляем..."
-        git -C "$INSTALL_DIR" pull --ff-only 2>/dev/null || true
+        # Не сбрасываем локальные изменения пользователя автоматически.
+        git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL" 2>/dev/null || true
+        git -C "$INSTALL_DIR" fetch origin "$REPO_BRANCH" 2>/dev/null || {
+            echo "Ошибка: не удалось получить ветку ${REPO_BRANCH}"
+            exit 1
+        }
+        git -C "$INSTALL_DIR" checkout "$REPO_BRANCH" 2>/dev/null || \
+            git -C "$INSTALL_DIR" checkout -b "$REPO_BRANCH" "origin/$REPO_BRANCH" 2>/dev/null || {
+                echo "Ошибка: не удалось переключиться на ветку ${REPO_BRANCH}"
+                exit 1
+            }
+        git -C "$INSTALL_DIR" pull --ff-only origin "$REPO_BRANCH" 2>/dev/null || {
+            echo "Ошибка: локальная копия расходится с origin/${REPO_BRANCH}; проверьте git status"
+            exit 1
+        }
     else
-        git clone "$REPO_URL" "$INSTALL_DIR" 2>/dev/null \
-            || { echo "Ошибка: не удалось клонировать репозиторий"; exit 1; }
+        git clone --branch "$REPO_BRANCH" --single-branch "$REPO_URL" "$INSTALL_DIR" 2>/dev/null \
+            || { echo "Ошибка: не удалось клонировать ветку ${REPO_BRANCH}"; exit 1; }
     fi
     chmod +x "${INSTALL_DIR}/server-manager.sh" 2>/dev/null || true
     # Симлинк для запуска из любого места
