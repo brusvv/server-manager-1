@@ -175,6 +175,8 @@ def load_archive(path: Path) -> dict[str, Any]:
             body = zf.read("users.json")
     except (zipfile.BadZipFile, KeyError, json.JSONDecodeError) as exc:
         raise UsersBackupError(f"Не удалось прочитать архив: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise UsersBackupError("manifest.json должен содержать JSON-объект")
     if manifest.get("format") != FORMAT or manifest.get("formatVersion") != FORMAT_VERSION:
         raise UsersBackupError("Неизвестный формат или версия Users-only архива")
     digest = hashlib.sha256(body).hexdigest()
@@ -184,6 +186,8 @@ def load_archive(path: Path) -> dict[str, Any]:
         payload = json.loads(body)
     except json.JSONDecodeError as exc:
         raise UsersBackupError("users.json содержит некорректный JSON") from exc
+    if not isinstance(payload, dict):
+        raise UsersBackupError("users.json должен содержать JSON-объект")
     users = payload.get("users")
     if payload.get("format") != FORMAT or payload.get("formatVersion") != FORMAT_VERSION:
         raise UsersBackupError("Внутренняя версия users.json не совпадает с manifest")
@@ -407,10 +411,16 @@ def import_archive(path: Path, squad_uuid: str, apply: bool) -> None:
         print("Нет новых пользователей. База не изменена.")
         return
     output = psql(build_import_sql(data["payload"], squad_uuid))
+    report_line = next((line for line in reversed(output.splitlines())
+                        if line.lstrip().startswith("{")), None)
     try:
-        report = json.loads(output.splitlines()[-1])
-    except (IndexError, json.JSONDecodeError) as exc:
-        raise UsersBackupError("Не удалось прочитать итоговый отчёт импорта") from exc
+        if report_line is None:
+            raise ValueError("JSON report was not returned")
+        report = json.loads(report_line)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise UsersBackupError(
+            "Импорт завершился без ошибки PostgreSQL, но итоговый JSON-отчёт не найден"
+        ) from exc
     print("Импорт завершён:")
     for key, value in report.items():
         print(f"  {key}: {value}")
