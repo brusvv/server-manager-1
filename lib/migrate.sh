@@ -378,8 +378,10 @@ migrate_menu() {
 panel_backup_restore() {
     header "Бэкап / Восстановление"
     # distillium/remnawave-backup-restore: расписание, Telegram и S3,
-    # шифрование age, выборочное восстановление.
-    # Точка входа запускается от root, поэтому версия закреплена тегом и SHA256.
+    # шифрование age, выборочное восстановление (всё / только БД / только файлы).
+    # Скрипт исполняется от root, поэтому версия зафиксирована тегом и SHA256.
+    # Пин защищает только скачиваемую точку входа: после запуска сам скрипт
+    # докачивает переводы и обновления с ветки main (это его собственное поведение).
     local rw_tag="4.3.0"
     local rw_sha256="ae36fa1df8a5998c599a643105b9386dbab6c3d25ef4381f77cdfdc5d841e6b2"
     local script_url="https://raw.githubusercontent.com/distillium/remnawave-backup-restore/${rw_tag}/backup-restore.sh"
@@ -409,6 +411,8 @@ panel_backup_restore() {
     fi
     chmod +x "$tmp"
     ok "backup-restore ${rw_tag} скачан, контрольная сумма совпала"
+    # При первом запуске скрипт сам переезжает в /opt/rw-backup-restore и
+    # создаёт команду rw-backup; временный файл после этого может не существовать.
     "$tmp"; rc=$?
     rm -f "$tmp"
     return $rc
