@@ -182,7 +182,7 @@ spinner() {
 ensure_sshpass() {
     command -v sshpass &>/dev/null && return 0
     info "Установка sshpass..."
-    apt-get install -y -q sshpass 2>/dev/null || \
+    apt-get -o DPkg::Lock::Timeout=300 install -y -q sshpass 2>/dev/null || \
         yum install -y sshpass 2>/dev/null || \
         die "Не удалось установить sshpass. Установи вручную: apt install sshpass"
     ok "sshpass установлен"
@@ -271,8 +271,8 @@ remote_install_deps() {
     info "Устанавливаем зависимости на новом сервере..."
     RUN bash -s << RDEPS
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y -q 2>/dev/null
-apt-get install -y -q curl wget git jq openssl ca-certificates gnupg dnsutils \
+apt-get -o DPkg::Lock::Timeout=300 update -y -q 2>/dev/null
+apt-get -o DPkg::Lock::Timeout=300 install -y -q curl wget git jq openssl ca-certificates gnupg dnsutils \
     certbot python3-certbot-dns-cloudflare sshpass${extra_pkgs} 2>/dev/null
 command -v docker &>/dev/null || { curl -fsSL https://get.docker.com | sh >/dev/null 2>&1; systemctl enable docker >/dev/null 2>&1; } # intentional: official Docker installer
 [ ! -f /swapfile ] && { fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile none swap sw 0 0' >> /etc/fstab; }
