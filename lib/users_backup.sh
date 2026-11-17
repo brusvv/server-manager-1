@@ -35,8 +35,16 @@ users_backup_restore_menu() {
                     read -rp "  Нажмите Enter..." < /dev/tty
                     continue
                 fi
+                local _squads_output=""
+                if ! _squads_output=$(python3 "$_worker" squads); then
+                    warn "Не удалось получить список Internal Squads"
+                    read -rp "  Нажмите Enter..." < /dev/tty
+                    continue
+                fi
                 local -a _squad_rows=()
-                mapfile -t _squad_rows < <(python3 "$_worker" squads)
+                if [ -n "$_squads_output" ]; then
+                    mapfile -t _squad_rows <<< "$_squads_output"
+                fi
                 if [ "\${#_squad_rows[@]}" -eq 0 ]; then
                     warn "На целевой панели нет Internal Squad. Сначала создайте группу."
                     read -rp "  Нажмите Enter..." < /dev/tty

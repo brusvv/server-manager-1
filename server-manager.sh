@@ -164,6 +164,7 @@ _load_module telemt
 _load_module hysteria
 _load_module migrate
 _load_module users_backup
+_load_module users_backup_menu
 _load_module cli/router
 
 check_root
