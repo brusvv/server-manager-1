@@ -100,7 +100,7 @@ ufw allow ${BASH_REMATCH[1]}/tcp >/dev/null 2>&1 || true"
 ufw allow 22/tcp  >/dev/null 2>&1 || true
 ${hy_fw_rules}
 ufw --force enable >/dev/null 2>&1 || true
-apt-get install -y qrencode >/dev/null 2>&1 || true
+apt-get -o DPkg::Lock::Timeout=300 install -y qrencode >/dev/null 2>&1 || true
 systemctl daemon-reload
 systemctl enable --now hysteria-server
 REMOTE
