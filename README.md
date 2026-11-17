@@ -5,12 +5,13 @@
 > Модульная система установки и управления VPN-инфраструктурой на базе Remnawave + Hysteria2 + MTProxy.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/stump3/server-manager/main/server-manager.sh | bash
+curl -fsSL https://raw.githubusercontent.com/brusvv/server-manager-1/sync/upstream-variant-f-j/server-manager.sh | bash
 ```
 
 [![Docs](https://img.shields.io/badge/docs-интерактивные-3b82f6?style=flat-square)](https://stump3.github.io/server-manager/README.html)
 [![Changelog](https://img.shields.io/badge/changelog-v3.3.1-22c55e?style=flat-square)](docs/CHANGELOG.md)
 [![Engineer](https://img.shields.io/badge/инженерам-ENGINEER.md-f59e0b?style=flat-square)](docs/ENGINEER.md)
+[![Branch](https://img.shields.io/badge/branch-sync%2Fupstream--variant--f--j-64748b?style=flat-square)](https://github.com/brusvv/server-manager-1/tree/sync/upstream-variant-f-j)
 
 </div>
 
@@ -42,29 +43,23 @@ curl -fsSL https://raw.githubusercontent.com/stump3/server-manager/main/server-m
 
 ```
 server-manager/
-├── server-manager.sh           # Точка входа — загружает модули локально или с GitHub
+├── server-manager.sh           # Точка входа и загрузчик модулей
 ├── lib/
-│   ├── common.sh               # Утилиты, цвета, главное меню, SSH-хелперы
-│   ├── panel.sh                # Remnawave Panel + Extensions
-│   ├── telemt.sh               # MTProxy (telemt)
-│   ├── hysteria.sh             # Loader: подключает модули из lib/hy2/
+│   ├── common/
+│   │   └── ssh.sh              # SSH-хелперы
+│   ├── panel/
+│   │   ├── install.sh          # Установка Remnawave Panel
+│   │   └── mgmt_script.sh      # Скрипт управления rp и резервное копирование
 │   ├── hy2/
-│   │   ├── core.sh             # Утилиты, проверки, чтение config.yaml
-│   │   ├── install.sh          # hysteria_install
-│   │   ├── users.sh            # add/delete/show links
+│   │   ├── install.sh          # Установка Hysteria2
 │   │   ├── integration.sh      # Интеграция с Remnawave
-│   │   └── menu.sh             # Меню, migrate, merge-sub, submenu_*
-│   └── migrate.sh              # Перенос сервисов между серверами
-├── integrations/
-│   ├── hy-sub-install.sh       # Установка интеграции Hysteria2 → Remnawave
-│   └── hy-webhook.py           # Python-сервис синхронизации пользователей
+│   │   └── menu.sh             # Меню и операции Hysteria2
+│   └── sripts/
+│       └── tests/
+│           └── test_mgmt_script_backup.sh
+├── integrations/               # Интеграционные компоненты
 ├── sub-injector/               # Rust-прокси для инжекции hy2:// в подписку
-│   ├── src/main.rs
-│   └── Cargo.toml
-└── docs/
-    ├── README.html             # Интерактивная документация (GitHub Pages)
-    ├── CHANGELOG.md
-    └── ENGINEER.md
+└── docs/                       # Документация проекта
 ```
 
 ---
@@ -72,14 +67,14 @@ server-manager/
 ## Быстрый старт
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/stump3/server-manager/main/server-manager.sh | bash
+curl -fsSL https://raw.githubusercontent.com/brusvv/server-manager-1/sync/upstream-variant-f-j/server-manager.sh | bash
 ```
 
 Или локально:
 
 ```bash
-git clone https://github.com/stump3/server-manager
-cd server-manager && bash server-manager.sh
+git clone --branch sync/upstream-variant-f-j https://github.com/brusvv/server-manager-1.git
+cd server-manager-1 && bash server-manager.sh
 ```
 
 ---
@@ -166,6 +161,15 @@ nginx (Docker, network_mode: host)
  7)  💾  Бэкап          8)  🏥  Диагноз     9)  🔓  Открыть порт 8443
 10)  🔐  Закрыть       11)  💻  CLI        12)  🔧  Переустановить скрипт (rp)
 ```
+
+### Резервное копирование
+
+Скрипт управления `rp` создаёт резервные копии конфигурации и базы PostgreSQL. Для PostgreSQL используются значения `POSTGRES_USER` и `POSTGRES_DB` из файла `.env`.
+
+- Файлы резервных копий создаются с ограниченными правами доступа.
+- Пустой дамп базы не считается успешной резервной копией.
+- При ошибке создания архива временный неполный архив удаляется.
+- Автоматическая очистка затрагивает только известные файлы резервных копий старше 7 дней.
 
 ### Доступ к панели
 
@@ -345,8 +349,8 @@ ufw allow in from 172.16.0.0/12 to any port 8766
 ### Вручную — один модуль
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/stump3/server-manager/main/lib/panel.sh" \
-    -o /root/lib/panel.sh
+curl -fsSL "https://raw.githubusercontent.com/brusvv/server-manager-1/sync/upstream-variant-f-j/lib/panel/install.sh" \
+    -o /root/lib/panel/install.sh
 ```
 
 ### После обновления
@@ -428,6 +432,14 @@ echo '/swapfile none swap sw 0 0' >> /etc/fstab
 ```
 
 ---
+
+## Проверка резервного копирования
+
+Тесты сценария резервного копирования находятся в `lib/sripts/tests/test_mgmt_script_backup.sh`. Запуск из корня репозитория:
+
+```bash
+bash lib/sripts/tests/test_mgmt_script_backup.sh
+```
 
 ## Лицензия
 
