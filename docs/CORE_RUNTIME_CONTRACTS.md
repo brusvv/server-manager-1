@@ -940,3 +940,18 @@ debt, so it is not listed here).
   for this document; found to be out-of-branch-scope per §0's Finding 3;
   not otherwise cited, since none of their specific claims were
   re-verified against `variant-f-j`.
+
+
+## 15. Users-only backup/restore Python component
+
+| Field | Contract |
+|---|---|
+| Type / path | One-shot CLI: lib/panel/py/users_backup.py |
+| Required | Python 3.10+, Docker Compose project at /opt/remnawave, remnawave-db PostgreSQL container, and checked user-related schema columns |
+| Input | CLI arguments; import reads a versioned .rwusers ZIP with manifest.json and users.json |
+| Output | Counts/conflicts on stdout, diagnostics on stderr; export archive mode 0600 |
+| Exit codes | 0 success; 1 operational/schema/database failure; argparse 2 for malformed invocation |
+| Idempotency | Export refuses overwrite. Import is add-only, generates target IDs, skips username/short UUID/VLESS UUID conflicts and uses one SQL transaction |
+| State ownership | Writes only users, user_traffic, user_meta, hwid_user_devices, and internal_squad_members rows. It does not alter infrastructure configuration or squad definitions |
+| Exclusions | Node-specific histories and source squad/config associations are deliberately not imported; source-node live connection state is cleared |
+| Safety | SHA-256 validation, size/format/schema preflight, explicit UI confirmation, payload sent through stdin (not argv), rollback on SQL failure |
