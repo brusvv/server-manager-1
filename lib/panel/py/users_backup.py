@@ -319,6 +319,12 @@ WITH inserted AS (
   description text,tag text,telegram_id bigint,email text,hwid_device_limit integer,
   last_triggered_threshold integer,created_at timestamp,updated_at timestamp
  )
+ WHERE NOT EXISTS (
+   SELECT 1 FROM public.users existing
+   WHERE existing.username = u.username
+      OR existing.short_uuid = u.short_uuid
+      OR existing.vless_uuid = u.vless_uuid
+ )
  ON CONFLICT DO NOTHING
  RETURNING id,username
 )
