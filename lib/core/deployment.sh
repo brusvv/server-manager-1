@@ -7,10 +7,20 @@
 # is explicitly not wired into) — self-sourcing by relative path keeps
 # `source lib/core/deployment.sh` alone sufficient for callers/tests,
 # rather than requiring them to know topology.sh must be sourced first.
-_CORE_DEPLOYMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=./topology.sh
-source "${_CORE_DEPLOYMENT_DIR}/topology.sh"
-unset _CORE_DEPLOYMENT_DIR
+# When loaded from the repository, source topology.sh beside this file.
+# The curl|bash bootstrap sources downloaded modules from a temporary file,
+# however, so BASH_SOURCE then points into /tmp rather than lib/core.
+# In that case delegate the dependency to the central module loader.
+if ! declare -F core_topology_is_valid >/dev/null 2>&1; then
+    if declare -F _sm_source_file >/dev/null 2>&1; then
+        _sm_source_file core/topology
+    else
+        _CORE_DEPLOYMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        # shellcheck source=./topology.sh
+        source "${_CORE_DEPLOYMENT_DIR}/topology.sh"
+        unset _CORE_DEPLOYMENT_DIR
+    fi
+fi
 #
 # Core/Runtime architecture, first implementation seam:
 #
