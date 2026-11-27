@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Import user accounts through the target Remnawave API; never overwrite target DB.
-remnawave_users_migrate() {
+remnawave_users_migrate() (
     header "Перенос пользователей Remnawave"
     local panel_dir="/opt/remnawave"
     [ -f "$panel_dir/docker-compose.yml" ] || { err "Исходная панель не найдена"; return 1; }
@@ -23,7 +23,7 @@ remnawave_users_migrate() {
     printf 'header = "Authorization: Bearer %s"\n' "$token" > "$auth_config"
     chmod 600 "$auth_config"
     unset token
-    trap 'rm -rf "$tmpdir"' RETURN
+    trap 'rm -rf "$tmpdir"' EXIT
 
     info "Проверяем API целевой панели..."
     local http_code
@@ -140,4 +140,4 @@ remnawave_users_migrate() {
     if [ "$errors" -gt 0 ]; then warn "Частичный перенос. Успешно созданные записи оставлены на целевой панели."; return 1; fi
     ok "Перенос учётных записей завершён"
     info "Проверьте пользователей и подписки на целевой панели."
-}
+)
