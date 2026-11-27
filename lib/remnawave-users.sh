@@ -10,7 +10,7 @@ remnawave_users_migrate() {
     read -rp "  URL целевой панели (https://panel.example.com): " target_url < /dev/tty
     target_url="${target_url%/}"
     [[ "$target_url" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || { err "Некорректный URL"; return 1; }
-    read -rsp "  API token (scopes users:create, users:read и internal-squads:list): " token < /dev/tty
+    read -rsp "  API token (scopes users:create, users:by-username, users:by-short-uuid и internal-squads:list): " token < /dev/tty
     echo
     [ -n "$token" ] || { err "Пустой API token"; return 1; }
 
@@ -20,7 +20,7 @@ remnawave_users_migrate() {
     local source_json="$tmpdir/source.json" target_squads="$tmpdir/target-squads.json"
     local response="$tmpdir/response.json" body="$tmpdir/body.json" payloads="$tmpdir/payloads.ndjson"
     local auth_config="$tmpdir/curl-auth.conf"
-    printf 'header = "Authorization: Bearer %s"\\n' "$token" > "$auth_config"
+    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$auth_config"
     chmod 600 "$auth_config"
     unset token
     trap 'rm -rf "$tmpdir"' RETURN
@@ -31,7 +31,7 @@ remnawave_users_migrate() {
         -K "$auth_config" -H 'Accept: application/json' "$target_url/api/internal-squads") || {
         err "Нет соединения с API целевой панели"; return 1;
     }
-    [ "$http_code" = "200" ] || { err "API вернул HTTP $http_code (проверьте URL и scopes users:read/internal-squads:list)"; return 1; }
+    [ "$http_code" = "200" ] || { err "API вернул HTTP $http_code (проверьте URL и scopes internal-squads:list)"; return 1; }
     jq -e '.response.internalSquads | type == "array"' "$target_squads" >/dev/null 2>&1 || {
         err "Неожиданный ответ API internal-squads"; return 1;
     }
@@ -115,7 +115,7 @@ remnawave_users_migrate() {
         printf '%s\n' "$line" > "$body"
         username=$(jq -r '.username' "$body")
         http_code=$(curl -sS --connect-timeout 8 --max-time 30 -o "$response" -w '%{http_code}' \
-            -X POST "$target_url/api/users" -H "Authorization: Bearer $token" \
+            -X POST "$target_url/api/users" -K "$auth_config" \
             -H 'Content-Type: application/json' -H 'Accept: application/json' --data-binary "@$body") || http_code="000"
         if [[ "$http_code" = "200" || "$http_code" = "201" ]]; then
             created=$((created+1)); ok "Создан: $username"
