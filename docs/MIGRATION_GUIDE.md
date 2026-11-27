@@ -115,7 +115,7 @@ systemctl restart telemt
 
 Перед запуском:
 
-1. Создайте на целевой панели API token с scopes:
+1. Создайте на целевой панели API token (допустимые символы: латинские буквы, цифры и `._~+/-`, `=` в конце) с scopes:
    - `users:create`
    - `users:by-username`
    - `users:by-short-uuid`
