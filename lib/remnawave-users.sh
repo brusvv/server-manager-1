@@ -315,15 +315,15 @@ remnawave_users_related_audit() (
         'vless_uuid',u.vless_uuid::text,'trojan_password',u.trojan_password,'ss_password',u.ss_password
       ) ORDER BY u.id) FROM users u), '[]'::json),
       'nodes', COALESCE((SELECT json_agg(json_build_object(
-        'id',n.id,'uuid',n.uuid::text,'name',n.name,'address',n.address,'port',n.port
+        'id',n.id::text,'uuid',n.uuid::text,'name',n.name,'address',n.address,'port',n.port
       ) ORDER BY n.id) FROM nodes n), '[]'::json),
-      'node_usage_ids', COALESCE((SELECT json_agg(DISTINCT node_id ORDER BY node_id) FROM nodes_user_usage_history), '[]'::json),
+      'node_usage_ids', COALESCE((SELECT json_agg(DISTINCT node_id::text ORDER BY node_id::text) FROM nodes_user_usage_history), '[]'::json),
       'last_connected_node_uuids', COALESCE((SELECT json_agg(DISTINCT last_connected_node_uuid ORDER BY last_connected_node_uuid)
         FROM user_traffic WHERE last_connected_node_uuid IS NOT NULL), '[]'::json),
       'stats', json_build_object(
         'user_traffic_rows',(SELECT count(*) FROM user_traffic),
-        'user_traffic_used_bytes',(SELECT COALESCE(sum(used_traffic_bytes),0) FROM user_traffic),
-        'user_traffic_lifetime_bytes',(SELECT COALESCE(sum(lifetime_used_traffic_bytes),0) FROM user_traffic),
+        'user_traffic_used_bytes',(SELECT COALESCE(sum(used_traffic_bytes),0)::text FROM user_traffic),
+        'user_traffic_lifetime_bytes',(SELECT COALESCE(sum(lifetime_used_traffic_bytes),0)::text FROM user_traffic),
         'user_traffic_with_last_node',(SELECT count(*) FROM user_traffic WHERE last_connected_node_uuid IS NOT NULL),
         'hwid_rows',(SELECT count(*) FROM hwid_user_devices),
         'hwid_users',(SELECT count(DISTINCT user_id) FROM hwid_user_devices),
@@ -331,7 +331,7 @@ remnawave_users_related_audit() (
         'node_usage_rows',(SELECT count(*) FROM nodes_user_usage_history),
         'node_usage_users',(SELECT count(DISTINCT user_id) FROM nodes_user_usage_history),
         'node_usage_nodes',(SELECT count(DISTINCT node_id) FROM nodes_user_usage_history),
-        'node_usage_total_bytes',(SELECT COALESCE(sum(total_bytes),0) FROM nodes_user_usage_history),
+        'node_usage_total_bytes',(SELECT COALESCE(sum(total_bytes),0)::text FROM nodes_user_usage_history),
         'subscription_history_rows',(SELECT count(*) FROM user_subscription_request_history),
         'subscription_history_users',(SELECT count(DISTINCT user_id) FROM user_subscription_request_history),
         'subscription_history_with_request_ip',(SELECT count(*) FROM user_subscription_request_history WHERE request_ip IS NOT NULL),
@@ -382,10 +382,10 @@ remnawave_users_related_audit() (
     # are required for the related-data phase.
     local referenced_nodes
     referenced_nodes="$(jq -cn --slurpfile src "$source_json" '
-      ((($src[0].node_usage_ids | map(tostring)) as $ids |
-        [$src[0].nodes[] | select($ids | index((.id|tostring)))]) +
+      ((($src[0].node_usage_ids) as $ids |
+        [$src[0].nodes[] as $node | select($ids | index($node.id)) | $node]) +
        (($src[0].last_connected_node_uuids // []) as $uuids |
-        [$src[0].nodes[] | select($uuids | index(.uuid))]))
+        [$src[0].nodes[] as $node | select($uuids | index($node.uuid)) | $node]))
       | unique_by(.id)
     ' 2>/dev/null)" || referenced_nodes="[]"
     node_total=$(jq 'length' <<< "$referenced_nodes")
@@ -397,6 +397,7 @@ remnawave_users_related_audit() (
         ' "$nodes_json")
         if [ "$(jq 'length' <<< "$node_matches")" = "1" ] && \
            [ "$(jq -r '.[0].id|type' <<< "$node_matches")" = "number" ] && \
+           [ "$(jq -r '.[0].id <= 9007199254740991' <<< "$node_matches")" = "true" ] && \
            [ -n "$(jq -r '.[0].uuid // empty' <<< "$node_matches")" ]; then
             node_mapped=$((node_mapped+1))
         else
