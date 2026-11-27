@@ -9,7 +9,7 @@ remnawave_users_migrate() {
     local target_url token
     read -rp "  URL целевой панели (https://panel.example.com): " target_url < /dev/tty
     target_url="${target_url%/}"
-    [[ "$target_url" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || { err "Некорректный URL"; return 1; }
+    [[ "$target_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || { err "Некорректный URL"; return 1; }
     read -rsp "  API token (scopes users:create, users:by-username, users:by-short-uuid и internal-squads:list): " token < /dev/tty
     echo
     [ -n "$token" ] || { err "Пустой API token"; return 1; }
@@ -61,7 +61,11 @@ remnawave_users_migrate() {
           .users[] | select(.username == $username) as $u |
           ($u.active_squad_names // []) as $names |
           [ $names[] as $n | ($target[0].response.internalSquads[] | select(.name == $n) | .uuid) ] as $mapped |
-          if ($mapped|length) != ($names|length) then error("target squad missing") else
+          if ($u.username|test("^[A-Za-z0-9_-]{3,36}$")|not) then error("invalid username")
+          elif (($u.tag // "") != "" and (($u.tag|length)>16 or ($u.tag|test("^[A-Z0-9_]+$")|not))) then error("invalid tag")
+          elif ($u.trojan_password != null and (($u.trojan_password|length)<8 or ($u.trojan_password|length)>32)) then error("invalid trojan password")
+          elif ($u.ss_password != null and (($u.ss_password|length)<8 or ($u.ss_password|length)>32)) then error("invalid shadowsocks password")
+          elif ($mapped|length) != ($names|length) then error("target squad missing") else
           {
             username:$u.username, status:$u.status, shortUuid:$u.short_uuid,
             trojanPassword:$u.trojan_password, vlessUuid:$u.vless_uuid, ssPassword:$u.ss_password,
@@ -74,7 +78,7 @@ remnawave_users_migrate() {
             activeInternalSquads:$mapped
           } | with_entries(select(.value != null)) end
         ' "$source_json" >> "$payloads" 2>/dev/null; then
-            warn "Не удалось подготовить $username: проверьте соответствие internal squad по имени"
+            warn "Не удалось подготовить $username: проверьте squad mapping и ограничения полей API (username/tag/password)"
             failed=1
         fi
     done < <(jq -r '.users[].username' "$source_json")
