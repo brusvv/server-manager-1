@@ -366,6 +366,7 @@ Remnawave Panel → Управление → 12) Переустановить с
 3) Перенести Hysteria2
 4) Перенести всё (Panel + MTProxy + Hysteria2)
 5) Бэкап / Восстановление (backup-restore)
+6) Перенести пользователей Remnawave
 ```
 
 | Данные | Panel | MTProxy | Hysteria2 |
@@ -375,6 +376,16 @@ Remnawave Panel → Управление → 12) Переустановить с
 | SSL сертификаты (letsencrypt) | ✓ | — | ✓ |
 | ACME сертификат Hysteria | — | — | ✓ |
 | Пользователи | ✓ | ✓ | ✓ |
+
+### Перенос только пользователей Remnawave
+
+Пункт **6) Перенести пользователей Remnawave** переносит учётные записи на уже установленную целевую панель через Remnawave API. Целевые ноды и одноимённые internal squad должны быть подготовлены заранее.
+
+Переносятся: username, статус, сроки, short UUID, VLESS/Trojan/SS credentials, лимиты, описание, tag, email/Telegram, HWID device limit и членство в internal squad (сопоставление по имени).
+
+Не переносятся: накопленные счётчики трафика, HWID fingerprints, история использования нод и история запросов подписки, внешние squad и node IDs. Скрипт не удаляет и не перезаписывает целевых пользователей; перед записью проверяет username и short UUID.
+
+Для API token целевой панели нужны scopes: `users:create`, `users:by-username`, `users:by-short-uuid`, `internal-squads:list`.
 
 > После переноса Hysteria2 обновите DNS домена на новый IP.
 > ACME сертификат переносится — перевыпуск не нужен.
