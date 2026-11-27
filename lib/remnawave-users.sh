@@ -13,6 +13,11 @@ remnawave_users_migrate() (
     read -rsp "  API token (scopes users:create, users:by-username, users:by-short-uuid и internal-squads:list): " token < /dev/tty
     echo
     [ -n "$token" ] || { err "Пустой API token"; return 1; }
+    # The token is written into a curl config file. Restrict it to the
+    # bearer-token alphabet so quotes/control characters cannot inject config.
+    [[ "$token" =~ ^[A-Za-z0-9._~+/-]+=*$ ]] || {
+        err "API token содержит недопустимые символы"; return 1;
+    }
 
     local tmpdir
     tmpdir="$(mktemp -d /tmp/rw-user-migrate.XXXXXX)" || return 1
@@ -141,7 +146,7 @@ remnawave_users_migrate() (
                 --arg username "$value" \
                 '{source_user_id:$source_user_id,target_user_id:$target_user_id,username:$username}' >> "$target_matches"
         elif [ "$check_code" = "404" ]; then
-            value=$(printf '%s' "$line" | jq -r '.shortUuid')
+            value=$(printf '%s' "$line" | jq -r '.shortUuid | @uri')
             check_code=$(curl -sS --connect-timeout 8 --max-time 20 -o /dev/null -w '%{http_code}' \
                 -K "$auth_config" "$target_url/api/users/by-short-uuid/$value") || check_code="000"
             if [ "$check_code" != "404" ]; then
