@@ -67,6 +67,9 @@ remnawave_users_migrate() {
           [ $names[] as $n | ($target[0].response.internalSquads[] | select(.name == $n) | .uuid) ] as $mapped |
           if ($u.username|test("^[A-Za-z0-9_-]{3,36}$")|not) then error("invalid username")
           elif (($u.tag // "") != "" and (($u.tag|length)>16 or ($u.tag|test("^[A-Z0-9_]+$")|not))) then error("invalid tag")
+          elif $u.expire_at == null then error("missing expiration")
+          elif (($u.traffic_limit_bytes|tonumber? // 0) > 9007199254740991) then error("traffic limit exceeds JS safe integer")
+          elif ($u.telegram_id != null and (($u.telegram_id|tonumber? // 0) > 9007199254740991)) then error("telegram id exceeds JS safe integer")
           elif ($u.trojan_password != null and (($u.trojan_password|length)<8 or ($u.trojan_password|length)>32)) then error("invalid trojan password")
           elif ($u.ss_password != null and (($u.ss_password|length)<8 or ($u.ss_password|length)>32)) then error("invalid shadowsocks password")
           elif ($mapped|length) != ($names|length) then error("target squad missing") else
@@ -76,7 +79,7 @@ remnawave_users_migrate() {
             trafficLimitBytes:($u.traffic_limit_bytes|tonumber? // 0),
             trafficLimitStrategy:$u.traffic_limit_strategy, expireAt:$u.expire_at,
             createdAt:$u.created_at, lastTrafficResetAt:$u.last_traffic_reset_at,
-            description:$u.description, tag:$u.tag,
+            description:$u.description, tag:($u.tag | if . == "" then null else . end),
             telegramId:($u.telegram_id|if . == null then null else (tonumber? // .) end),
             email:$u.email, hwidDeviceLimit:($u.hwid_device_limit|tonumber? // 0),
             activeInternalSquads:$mapped
