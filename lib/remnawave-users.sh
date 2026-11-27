@@ -68,6 +68,7 @@ remnawave_users_migrate() (
           if ($u.username|test("^[A-Za-z0-9_-]{3,36}$")|not) then error("invalid username")
           elif (($u.tag // "") != "" and (($u.tag|length)>16 or ($u.tag|test("^[A-Z0-9_]+$")|not))) then error("invalid tag")
           elif $u.expire_at == null then error("missing expiration")
+          elif ($u.short_uuid == null or $u.short_uuid == "") then error("missing short UUID")
           elif (($u.traffic_limit_bytes|tonumber? // 0) > 9007199254740991) then error("traffic limit exceeds JS safe integer")
           elif ($u.telegram_id != null and (($u.telegram_id|tonumber? // 0) > 9007199254740991)) then error("telegram id exceeds JS safe integer")
           elif ($u.trojan_password != null and (($u.trojan_password|length)<8 or ($u.trojan_password|length)>32)) then error("invalid trojan password")
@@ -91,6 +92,21 @@ remnawave_users_migrate() (
     done < <(jq -r '.users[].username' "$source_json")
     if [ "$failed" -ne 0 ]; then err "Проверка прервана до записи: не все squad сопоставлены"; return 1; fi
     [ "$(wc -l < "$payloads" | tr -d ' ')" = "$user_count" ] || { err "Число подготовленных записей не совпало"; return 1; }
+
+    # Reject duplicate source identifiers before querying or writing to the target.
+    local duplicate_key duplicates
+    for duplicate_key in username shortUuid vlessUuid; do
+        duplicates=$(jq -s -r --arg key "$duplicate_key" '
+          [.[] | select(.[$key] != null and .[$key] != "")] |
+          group_by(.[$key]) | map(select(length > 1) | .[0][$key]) | .[]
+        ' "$payloads")
+        if [ -n "$duplicates" ]; then
+            err "В исходных данных найдены повторяющиеся значения $duplicate_key:"
+            printf '%s\\n' "$duplicates"
+            err "Перенос остановлен до записи на целевую панель"
+            return 1
+        fi
+    done
 
     # Check all primary unique identifiers on target before the first write.
     info "Проверяем конфликты username и short UUID на целевой панели..."
@@ -123,7 +139,6 @@ remnawave_users_migrate() (
 
     local target_host journal_dir journal
     target_host="${target_url#https://}"
-    target_host="${target_host%%:*}"
     target_host="${target_host//[^A-Za-z0-9._-]/_}"
     journal_dir="/var/lib/server-manager/migrations"
     if ! install -d -m 700 "$journal_dir"; then
