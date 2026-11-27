@@ -83,7 +83,7 @@ remnawave_users_migrate() {
 
     # Check all primary unique identifiers on target before the first write.
     info "Проверяем конфликты username и short UUID на целевой панели..."
-    local key value check_path check_code
+    local key value check_path check_code line
     while IFS= read -r line; do
         for key in username shortUuid; do
             value=$(printf '%s' "$line" | jq -r ".$key")
@@ -110,7 +110,7 @@ remnawave_users_migrate() {
     read -rp "  Для запуска введите yes: " confirm < /dev/tty
     [ "$confirm" = "yes" ] || { info "Отменено, изменений нет"; return 0; }
 
-    local created=0 errors=0 line
+    local created=0 errors=0
     while IFS= read -r line; do
         printf '%s\n' "$line" > "$body"
         username=$(jq -r '.username' "$body")
