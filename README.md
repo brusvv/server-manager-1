@@ -385,7 +385,7 @@ Remnawave Panel → Управление → 12) Переустановить с
 
 Не переносятся: накопленные счётчики трафика, HWID fingerprints, история использования нод и история запросов подписки, внешние squad и node IDs. Скрипт не удаляет и не перезаписывает целевых пользователей; перед записью проверяет username и short UUID.
 
-Для API token целевой панели нужны scopes: `users:create`, `users:by-username`, `users:by-short-uuid`, `internal-squads:list`.
+Используется только HTTPS URL целевой панели. Для API token целевой панели нужны scopes: `users:create`, `users:by-username`, `users:by-short-uuid`, `internal-squads:list`.
 
 > После переноса Hysteria2 обновите DNS домена на новый IP.
 > ACME сертификат переносится — перевыпуск не нужен.
