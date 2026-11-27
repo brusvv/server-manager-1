@@ -37,14 +37,18 @@ remnawave_users_migrate() {
     }
 
     info "Экспортируем исходные учётные записи..."
-    local sql
+    local sql pg_user pg_db
+    pg_user=$(grep -m1 '^POSTGRES_USER=' "$panel_dir/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\\r")
+    pg_db=$(grep -m1 '^POSTGRES_DB=' "$panel_dir/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\\r")
+    pg_user="${pg_user:-postgres}"
+    pg_db="${pg_db:-postgres}"
     sql="SELECT json_build_object('users', COALESCE((
       SELECT json_agg((to_jsonb(u) || jsonb_build_object('active_squad_names',
         COALESCE((SELECT json_agg(s.name ORDER BY s.name)
           FROM internal_squad_members m JOIN internal_squads s ON s.uuid=m.internal_squad_uuid
           WHERE m.user_id=u.id), '[]'::json))) ORDER BY u.id) FROM users u
     ), '[]'::json))::text;"
-    if ! (cd "$panel_dir" && docker compose exec -T remnawave-db psql -X -U postgres -d remnawave -Atqc "$sql") > "$source_json"; then
+    if ! (cd "$panel_dir" && docker compose exec -T remnawave-db psql -X -U "$pg_user" -d "$pg_db" -Atqc "$sql") > "$source_json"; then
         err "Не удалось экспортировать пользователей из БД"; return 1;
     fi
     jq -e '.users | type == "array"' "$source_json" >/dev/null 2>&1 || { err "Некорректный экспорт БД"; return 1; }
