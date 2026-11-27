@@ -150,7 +150,7 @@ remnawave_users_migrate() (
     case "$mode" in
         1)
             ok "Dry-run завершён: все $user_count пользователей прошли предварительную проверку"
-            info "Изменений на целевой панели не выполнено. Журнал операций не содержит записей о создании."
+            info "Изменений на целевой панели не выполнено; новые записи в журнал не добавлялись."
             return 0
             ;;
         2) ;;
@@ -161,7 +161,7 @@ remnawave_users_migrate() (
     read -rp "  Для запуска введите yes: " confirm < /dev/tty
     [ "$confirm" = "yes" ] || { info "Отменено, изменений нет"; return 0; }
 
-    local created=0 errors=0 timestamp result_status
+    local created=0 errors=0 journal_errors=0 timestamp result_status
     while IFS= read -r line; do
         printf '%s\n' "$line" > "$body"
         username=$(jq -r '.username' "$body")
@@ -177,14 +177,16 @@ remnawave_users_migrate() (
         if ! jq -cn --arg timestamp "$timestamp" --arg username "$username" \
             --arg status "$result_status" --arg http_code "$http_code" \
             '{timestamp:$timestamp,username:$username,status:$status,http_code:$http_code}' >> "$journal"; then
-            warn "Не удалось записать результат $username в журнал"
+            journal_errors=$((journal_errors+1))
+            warn "Не удалось записать результат $username в журнал; дальнейшее создание остановлено"
+            break
         fi
     done < "$payloads"
 
     echo ""
-    echo "  Результат: создано $created из $user_count; ошибок: $errors"
+    echo "  Результат: создано $created из $user_count; ошибок API: $errors; ошибок журнала: $journal_errors"
     info "Журнал операций сохранён: $journal"
-    if [ "$errors" -gt 0 ]; then warn "Частичный перенос. Успешно созданные записи оставлены на целевой панели."; return 1; fi
+    if [ "$errors" -gt 0 ] || [ "$journal_errors" -gt 0 ]; then warn "Частичный перенос. Успешно созданные записи оставлены на целевой панели."; return 1; fi
     ok "Перенос учётных записей завершён"
     info "Проверьте пользователей и подписки на целевой панели."
 )
