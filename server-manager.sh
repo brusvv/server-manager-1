@@ -129,6 +129,7 @@ _load_module panel
 _load_module telemt
 _load_module hysteria
 _load_module migrate
+_load_module remnawave-users
 
 check_root
 main_menu
