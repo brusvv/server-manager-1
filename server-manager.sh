@@ -83,6 +83,7 @@ declare -A _MODULE_SHA256=(
     ["telemt"]=""
     ["hysteria"]=""
     ["migrate"]=""
+    ["remnawave-users"]=""
 )
 
 _load_module() {
