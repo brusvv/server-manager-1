@@ -10,7 +10,7 @@ remnawave_users_migrate() {
     read -rp "  URL целевой панели (https://panel.example.com): " target_url < /dev/tty
     target_url="${target_url%/}"
     [[ "$target_url" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || { err "Некорректный URL"; return 1; }
-    read -rsp "  API token (scopes users:create и internal-squads:list): " token < /dev/tty
+    read -rsp "  API token (scopes users:create, users:read и internal-squads:list): " token < /dev/tty
     echo
     [ -n "$token" ] || { err "Пустой API token"; return 1; }
 
@@ -19,15 +19,19 @@ remnawave_users_migrate() {
     chmod 700 "$tmpdir"
     local source_json="$tmpdir/source.json" target_squads="$tmpdir/target-squads.json"
     local response="$tmpdir/response.json" body="$tmpdir/body.json" payloads="$tmpdir/payloads.ndjson"
-    trap 'rm -rf "$tmpdir"; unset token' RETURN
+    local auth_config="$tmpdir/curl-auth.conf"
+    printf 'header = "Authorization: Bearer %s"\\n' "$token" > "$auth_config"
+    chmod 600 "$auth_config"
+    unset token
+    trap 'rm -rf "$tmpdir"' RETURN
 
     info "Проверяем API целевой панели..."
     local http_code
     http_code=$(curl -sS --connect-timeout 8 --max-time 20 -o "$target_squads" -w '%{http_code}' \
-        -H "Authorization: Bearer $token" -H 'Accept: application/json' "$target_url/api/internal-squads") || {
+        -K "$auth_config" -H 'Accept: application/json' "$target_url/api/internal-squads") || {
         err "Нет соединения с API целевой панели"; return 1;
     }
-    [ "$http_code" = "200" ] || { err "API вернул HTTP $http_code (проверьте URL и scope internal-squads:list)"; return 1; }
+    [ "$http_code" = "200" ] || { err "API вернул HTTP $http_code (проверьте URL и scopes users:read/internal-squads:list)"; return 1; }
     jq -e '.response.internalSquads | type == "array"' "$target_squads" >/dev/null 2>&1 || {
         err "Неожиданный ответ API internal-squads"; return 1;
     }
@@ -76,6 +80,25 @@ remnawave_users_migrate() {
     done < <(jq -r '.users[].username' "$source_json")
     if [ "$failed" -ne 0 ]; then err "Проверка прервана до записи: не все squad сопоставлены"; return 1; fi
     [ "$(wc -l < "$payloads" | tr -d ' ')" = "$user_count" ] || { err "Число подготовленных записей не совпало"; return 1; }
+
+    # Check all primary unique identifiers on target before the first write.
+    info "Проверяем конфликты username и short UUID на целевой панели..."
+    local key value check_path check_code
+    while IFS= read -r line; do
+        for key in username shortUuid; do
+            value=$(printf '%s' "$line" | jq -r ".$key")
+            if [ "$key" = "username" ]; then check_path="by-username/$value"; else check_path="by-short-uuid/$value"; fi
+            check_code=$(curl -sS --connect-timeout 8 --max-time 20 -o /dev/null -w '%{http_code}' \
+                -K "$auth_config" "$target_url/api/users/$check_path") || check_code="000"
+            if [ "$check_code" = "200" ]; then
+                err "На целевой панели уже существует пользователь с $key=$value. Запись не начата."
+                return 1
+            elif [ "$check_code" != "404" ]; then
+                err "Не удалось проверить $key=$value (HTTP $check_code). Запись не начата."
+                return 1
+            fi
+        done
+    done < "$payloads"
 
     echo ""
     echo "  Будет создано пользователей: $user_count"
