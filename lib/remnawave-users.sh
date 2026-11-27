@@ -312,7 +312,7 @@ remnawave_users_related_audit() (
     info "Собираем агрегаты и технические ID из исходной БД (без IP и HWID значений)..."
     sql="SELECT json_build_object(
       'users', COALESCE((SELECT json_agg(json_build_object(
-        'id',u.id,'username',u.username,'short_uuid',u.short_uuid,
+        'id',u.id::text,'username',u.username,'short_uuid',u.short_uuid,
         'vless_uuid',u.vless_uuid::text,'trojan_password',u.trojan_password,'ss_password',u.ss_password
       ) ORDER BY u.id) FROM users u), '[]'::json),
       'nodes', COALESCE((SELECT json_agg(json_build_object(
@@ -366,7 +366,7 @@ remnawave_users_related_audit() (
             -K "$auth_config" "$target_url/api/users/by-username/$username") || http_code="000"
         if [ "$http_code" = "200" ] && jq -e --argjson source "$user_line" '
             .response as $target |
-            ($target.id|type=="number") and
+            ($target.id|type=="number" and . <= 9007199254740991) and
             ($target.username==$source.username) and
             ($target.shortUuid==$source.short_uuid) and
             ($target.vlessUuid==$source.vless_uuid) and
@@ -382,13 +382,15 @@ remnawave_users_related_audit() (
     # Only nodes referenced by either user_traffic or nodes_user_usage_history
     # are required for the related-data phase.
     local referenced_nodes
-    referenced_nodes="$(jq -cn --slurpfile src "$source_json" '
+    if ! referenced_nodes="$(jq -cn --slurpfile src "$source_json" '
       ((($src[0].node_usage_ids) as $ids |
         [$src[0].nodes[] as $node | select($ids | index($node.id)) | $node]) +
        (($src[0].last_connected_node_uuids // []) as $uuids |
         [$src[0].nodes[] as $node | select($uuids | index($node.uuid)) | $node]))
       | unique_by(.id)
-    ' 2>/dev/null)" || referenced_nodes="[]"
+    ')"; then
+        err "Не удалось вычислить список исходных нод для сопоставления"; return 1;
+    fi
     node_total=$(jq 'length' <<< "$referenced_nodes")
     node_mapped=0; node_unmapped=0
     while IFS= read -r node_line; do
