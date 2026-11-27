@@ -102,7 +102,7 @@ remnawave_users_migrate() (
         ' "$payloads")
         if [ -n "$duplicates" ]; then
             err "В исходных данных найдены повторяющиеся значения $duplicate_key:"
-            printf '%s\\n' "$duplicates"
+            printf '%s\n' "$duplicates"
             err "Перенос остановлен до записи на целевую панель"
             return 1
         fi
@@ -126,16 +126,6 @@ remnawave_users_migrate() (
             fi
         done
     done < "$payloads"
-
-    echo ""
-    echo "  Будет создано пользователей: $user_count"
-    echo "  Internal squad на целевой панели: $squad_count"
-    echo "  Переносятся: username, статусы, сроки, UUID/пароли протоколов, лимиты, описание, теги, email/Telegram, HWID limit и squad membership."
-    echo ""
-    warn "Не переносятся: накопленный трафик, HWID fingerprints, node/subscription history, внешние squad и node IDs."
-    warn "Целевые пользователи не перезаписываются. При совпадении уникальных полей API отклонит создание."
-    read -rp "  Для запуска введите yes: " confirm < /dev/tty
-    [ "$confirm" = "yes" ] || { info "Отменено, изменений нет"; return 0; }
 
     local target_host journal_dir journal
     target_host="${target_url#https://}"
