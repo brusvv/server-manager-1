@@ -339,6 +339,7 @@ remnawave_users_related_audit() (
         'orphan_hwid_users',(SELECT count(*) FROM hwid_user_devices h LEFT JOIN users u ON u.id=h.user_id WHERE u.id IS NULL),
         'orphan_node_usage_users',(SELECT count(*) FROM nodes_user_usage_history h LEFT JOIN users u ON u.id=h.user_id WHERE u.id IS NULL),
         'orphan_node_usage_nodes',(SELECT count(*) FROM nodes_user_usage_history h LEFT JOIN nodes n ON n.id=h.node_id WHERE n.id IS NULL),
+        'orphan_last_connected_nodes',(SELECT count(*) FROM user_traffic t LEFT JOIN nodes n ON n.uuid=t.last_connected_node_uuid WHERE t.last_connected_node_uuid IS NOT NULL AND n.uuid IS NULL),
         'orphan_subscription_users',(SELECT count(*) FROM user_subscription_request_history h LEFT JOIN users u ON u.id=h.user_id WHERE u.id IS NULL)
       )
     )::text;"
@@ -381,11 +382,11 @@ remnawave_users_related_audit() (
     # are required for the related-data phase.
     local referenced_nodes
     referenced_nodes="$(jq -cn --slurpfile src "$source_json" '
-      (($src[0].node_usage_ids | map(tostring)) as $ids |
-       [$src[0].nodes[] | select($ids | index((.id|tostring)))]),
-      (($src[0].last_connected_node_uuids // []) as $uuids |
-       [$src[0].nodes[] | select($uuids | index(.uuid))])
-      | add | unique_by(.id)
+      ((($src[0].node_usage_ids | map(tostring)) as $ids |
+        [$src[0].nodes[] | select($ids | index((.id|tostring)))]) +
+       (($src[0].last_connected_node_uuids // []) as $uuids |
+        [$src[0].nodes[] | select($uuids | index(.uuid))]))
+      | unique_by(.id)
     ' 2>/dev/null)" || referenced_nodes="[]"
     node_total=$(jq 'length' <<< "$referenced_nodes")
     node_mapped=0; node_unmapped=0
@@ -414,7 +415,7 @@ remnawave_users_related_audit() (
     warn "Целевая БД не изменялась. API-сверка не проверяет конфликты существующих HWID/истории на целевой стороне."
     warn "Текущий API-аудит не проверяет, совпадают ли накопленные счётчики на целевой панели."
     if [ "$users_unmapped" -gt 0 ] || [ "$node_unmapped" -gt 0 ] || \
-       [ "$(jq '[.stats.orphan_user_traffic,.stats.orphan_hwid_users,.stats.orphan_node_usage_users,.stats.orphan_node_usage_nodes,.stats.orphan_subscription_users] | add' "$source_json")" -gt 0 ]; then
+       [ "$(jq '[.stats.orphan_user_traffic,.stats.orphan_hwid_users,.stats.orphan_node_usage_users,.stats.orphan_node_usage_nodes,.stats.orphan_last_connected_nodes,.stats.orphan_subscription_users] | add' "$source_json")" -gt 0 ]; then
         err "Аудит завершён с блокирующими несоответствиями. Перенос связанных данных пока невозможен."
         return 1
     fi
