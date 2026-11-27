@@ -256,4 +256,169 @@ remnawave_users_migrate() (
     if [ "$errors" -gt 0 ] || [ "$journal_errors" -gt 0 ]; then warn "Частичный перенос. Успешно созданные записи оставлены на целевой панели."; return 1; fi
     ok "Перенос учётных записей завершён"
     info "Проверьте пользователей и подписки на целевой панели."
+
+# Read-only preflight for the related Remnawave tables. No INSERT/UPDATE/DELETE
+# is performed here; the target IDs are obtained from read-only API responses.
+remnawave_users_related_audit() (
+    header "Аудит связанных данных Remnawave (только чтение)"
+    local panel_dir="/opt/remnawave"
+    [ -f "$panel_dir/docker-compose.yml" ] || { err "Исходная панель не найдена"; return 1; }
+    for cmd in docker jq curl; do command -v "$cmd" >/dev/null 2>&1 || { err "Не найдена зависимость: $cmd"; return 1; }; done
+
+    local target_url token
+    read -rp "  URL целевой панели (https://panel.example.com): " target_url < /dev/tty
+    target_url="${target_url%/}"
+    [[ "$target_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || { err "Некорректный URL"; return 1; }
+    read -rsp "  API token (scopes users:by-username и nodes:list): " token < /dev/tty
+    echo
+    [ -n "$token" ] || { err "Пустой API token"; return 1; }
+    [[ "$token" =~ ^[A-Za-z0-9._~+/-]+=*$ ]] || { err "API token содержит недопустимые символы"; return 1; }
+
+    local tmpdir auth_config source_json nodes_json response
+    tmpdir="$(mktemp -d /tmp/rw-related-audit.XXXXXX)" || return 1
+    chmod 700 "$tmpdir"
+    auth_config="$tmpdir/curl-auth.conf"
+    source_json="$tmpdir/source-audit.json"
+    nodes_json="$tmpdir/target-nodes.json"
+    response="$tmpdir/target-user.json"
+    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$auth_config"
+    chmod 600 "$auth_config"
+    unset token
+    trap 'rm -rf "$tmpdir"' EXIT
+
+    local pg_user pg_db table_check sql http_code
+    pg_user=$(grep -m1 '^POSTGRES_USER=' "$panel_dir/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\\r")
+    pg_db=$(grep -m1 '^POSTGRES_DB=' "$panel_dir/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'\\r")
+    pg_user="${pg_user:-postgres}"
+    pg_db="${pg_db:-postgres}"
+
+    info "Проверяем наличие таблиц в исходной БД..."
+    sql="SELECT json_agg(t.table_name ORDER BY t.table_name)::text
+         FROM information_schema.tables t
+         WHERE t.table_schema='public'
+           AND t.table_name IN ('users','nodes','user_traffic','hwid_user_devices','nodes_user_usage_history','user_subscription_request_history');"
+    table_check="$(cd "$panel_dir" && docker compose exec -T remnawave-db psql -X -U "$pg_user" -d "$pg_db" -Atqc "$sql")" || {
+        err "Не удалось проверить схему исходной БД"; return 1;
+    }
+    local required_tables
+    required_tables='["users","nodes","user_traffic","hwid_user_devices","nodes_user_usage_history","user_subscription_request_history"]'
+    if ! jq -e --argjson required "$required_tables" 'type=="array" and ($required - $) == []' <<< "$table_check" >/dev/null 2>&1; then
+        err "В исходной БД отсутствует одна или несколько необходимых таблиц."
+        info "Обнаружены таблицы: ${table_check:-[]}"
+        return 1
+    fi
+
+    info "Собираем агрегаты и технические ID из исходной БД (без IP и HWID значений)..."
+    sql="SELECT json_build_object(
+      'users', COALESCE((SELECT json_agg(json_build_object(
+        'id',u.id,'username',u.username,'short_uuid',u.short_uuid,
+        'vless_uuid',u.vless_uuid::text,'trojan_password',u.trojan_password,'ss_password',u.ss_password
+      ) ORDER BY u.id) FROM users u), '[]'::json),
+      'nodes', COALESCE((SELECT json_agg(json_build_object(
+        'id',n.id,'uuid',n.uuid::text,'name',n.name,'address',n.address,'port',n.port
+      ) ORDER BY n.id) FROM nodes n), '[]'::json),
+      'node_usage_ids', COALESCE((SELECT json_agg(DISTINCT node_id ORDER BY node_id) FROM nodes_user_usage_history), '[]'::json),
+      'last_connected_node_uuids', COALESCE((SELECT json_agg(DISTINCT last_connected_node_uuid ORDER BY last_connected_node_uuid)
+        FROM user_traffic WHERE last_connected_node_uuid IS NOT NULL), '[]'::json),
+      'stats', json_build_object(
+        'user_traffic_rows',(SELECT count(*) FROM user_traffic),
+        'user_traffic_used_bytes',(SELECT COALESCE(sum(used_traffic_bytes),0) FROM user_traffic),
+        'user_traffic_lifetime_bytes',(SELECT COALESCE(sum(lifetime_used_traffic_bytes),0) FROM user_traffic),
+        'user_traffic_with_last_node',(SELECT count(*) FROM user_traffic WHERE last_connected_node_uuid IS NOT NULL),
+        'hwid_rows',(SELECT count(*) FROM hwid_user_devices),
+        'hwid_users',(SELECT count(DISTINCT user_id) FROM hwid_user_devices),
+        'hwid_rows_with_request_ip',(SELECT count(*) FROM hwid_user_devices WHERE request_ip IS NOT NULL),
+        'node_usage_rows',(SELECT count(*) FROM nodes_user_usage_history),
+        'node_usage_users',(SELECT count(DISTINCT user_id) FROM nodes_user_usage_history),
+        'node_usage_nodes',(SELECT count(DISTINCT node_id) FROM nodes_user_usage_history),
+        'node_usage_total_bytes',(SELECT COALESCE(sum(total_bytes),0) FROM nodes_user_usage_history),
+        'subscription_history_rows',(SELECT count(*) FROM user_subscription_request_history),
+        'subscription_history_users',(SELECT count(DISTINCT user_id) FROM user_subscription_request_history),
+        'subscription_history_with_request_ip',(SELECT count(*) FROM user_subscription_request_history WHERE request_ip IS NOT NULL),
+        'orphan_user_traffic',(SELECT count(*) FROM user_traffic t LEFT JOIN users u ON u.id=t.id WHERE u.id IS NULL),
+        'orphan_hwid_users',(SELECT count(*) FROM hwid_user_devices h LEFT JOIN users u ON u.id=h.user_id WHERE u.id IS NULL),
+        'orphan_node_usage_users',(SELECT count(*) FROM nodes_user_usage_history h LEFT JOIN users u ON u.id=h.user_id WHERE u.id IS NULL),
+        'orphan_node_usage_nodes',(SELECT count(*) FROM nodes_user_usage_history h LEFT JOIN nodes n ON n.id=h.node_id WHERE n.id IS NULL),
+        'orphan_subscription_users',(SELECT count(*) FROM user_subscription_request_history h LEFT JOIN users u ON u.id=h.user_id WHERE u.id IS NULL)
+      )
+    )::text;"
+    if ! (cd "$panel_dir" && docker compose exec -T remnawave-db psql -X -U "$pg_user" -d "$pg_db" -Atqc "$sql") > "$source_json"; then
+        err "Не удалось прочитать связанные таблицы"; return 1;
+    fi
+    jq -e '.users|type=="array"' "$source_json" >/dev/null 2>&1 || { err "Некорректный ответ аудита БД"; return 1; }
+
+    info "Получаем список нод целевой панели (GET /api/nodes)..."
+    http_code=$(curl -sS --connect-timeout 8 --max-time 25 -o "$nodes_json" -w '%{http_code}' \
+        -K "$auth_config" -H 'Accept: application/json' "$target_url/api/nodes") || {
+        err "Нет соединения с API целевой панели"; return 1;
+    }
+    [ "$http_code" = "200" ] || { err "API нод вернул HTTP $http_code (нужен scope nodes:list)"; return 1; }
+    jq -e '.response|type=="array"' "$nodes_json" >/dev/null 2>&1 || { err "Неожиданный формат списка нод"; return 1; }
+
+    local users_total users_mapped users_unmapped user_line username node_total node_mapped node_unmapped node_line
+    users_total=$(jq '.users|length' "$source_json")
+    users_mapped=0; users_unmapped=0
+    while IFS= read -r user_line; do
+        username=$(printf '%s' "$user_line" | jq -r '.username')
+        http_code=$(curl -sS --connect-timeout 8 --max-time 20 -o "$response" -w '%{http_code}' \
+            -K "$auth_config" "$target_url/api/users/by-username/$username") || http_code="000"
+        if [ "$http_code" = "200" ] && jq -e --argjson source "$user_line" '
+            .response as $target |
+            ($target.id|type=="number") and
+            ($target.username==$source.username) and
+            ($target.shortUuid==$source.short_uuid) and
+            ($target.vlessUuid==$source.vless_uuid) and
+            ($target.trojanPassword==$source.trojan_password) and
+            ($target.ssPassword==$source.ss_password)
+        ' "$response" >/dev/null 2>&1; then
+            users_mapped=$((users_mapped+1))
+        else
+            users_unmapped=$((users_unmapped+1))
+        fi
+    done < <(jq -c '.users[]' "$source_json")
+
+    # Only nodes referenced by either user_traffic or nodes_user_usage_history
+    # are required for the related-data phase.
+    local referenced_nodes
+    referenced_nodes="$(jq -cn --slurpfile src "$source_json" '
+      (($src[0].node_usage_ids | map(tostring)) as $ids |
+       [$src[0].nodes[] | select($ids | index((.id|tostring)))]),
+      (($src[0].last_connected_node_uuids // []) as $uuids |
+       [$src[0].nodes[] | select($uuids | index(.uuid))])
+      | add | unique_by(.id)
+    ' 2>/dev/null)" || referenced_nodes="[]"
+    node_total=$(jq 'length' <<< "$referenced_nodes")
+    node_mapped=0; node_unmapped=0
+    while IFS= read -r node_line; do
+        local node_matches
+        node_matches=$(jq --argjson source "$node_line" '
+          [.response[] | select(.name==$source.name and .address==$source.address and .port==$source.port)]
+        ' "$nodes_json")
+        if [ "$(jq 'length' <<< "$node_matches")" = "1" ] && \
+           [ "$(jq -r '.[0].id|type' <<< "$node_matches")" = "number" ] && \
+           [ -n "$(jq -r '.[0].uuid // empty' <<< "$node_matches")" ]; then
+            node_mapped=$((node_mapped+1))
+        else
+            node_unmapped=$((node_unmapped+1))
+        fi
+    done < <(jq -c '.[]' <<< "$referenced_nodes")
+
+    echo ""
+    echo "  Исходные пользователи: $users_total; точное сопоставление с целевой API: $users_mapped; не сопоставлено: $users_unmapped"
+    echo "  Ноды, используемые связанными таблицами: $node_total; точное сопоставление name+address+port: $node_mapped; не сопоставлено: $node_unmapped"
+    echo ""
+    echo "  Статистика исходной БД:"
+    jq -r '.stats | to_entries[] | "    \(.key): \(.value)"' "$source_json"
+    echo ""
+    warn "IP-адреса и HWID не выводились; учитывались только количества строк с request_ip."
+    warn "Целевая БД не изменялась. API-сверка не проверяет конфликты существующих HWID/истории на целевой стороне."
+    warn "Текущий API-аудит не проверяет, совпадают ли накопленные счётчики на целевой панели."
+    if [ "$users_unmapped" -gt 0 ] || [ "$node_unmapped" -gt 0 ] || \
+       [ "$(jq '[.stats.orphan_user_traffic,.stats.orphan_hwid_users,.stats.orphan_node_usage_users,.stats.orphan_node_usage_nodes,.stats.orphan_subscription_users] | add' "$source_json")" -gt 0 ]; then
+        err "Аудит завершён с блокирующими несоответствиями. Перенос связанных данных пока невозможен."
+        return 1
+    fi
+    ok "Базовое сопоставление пользователей и используемых нод прошло. Это ещё не разрешение на запись."
+)
+
 )
