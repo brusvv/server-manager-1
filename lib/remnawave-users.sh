@@ -8,7 +8,7 @@ remnawave_users_migrate() {
 
     local target_url token
     read -rp "  URL целевой панели (https://panel.example.com): " target_url < /dev/tty
-    target_url="\${target_url%/}"
+    target_url="${target_url%/}"
     [[ "$target_url" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || { err "Некорректный URL"; return 1; }
     read -rsp "  API token (scopes users:create и internal-squads:list): " token < /dev/tty
     echo
@@ -35,7 +35,7 @@ remnawave_users_migrate() {
     info "Экспортируем исходные учётные записи..."
     local sql
     sql="SELECT json_build_object('users', COALESCE((
-      SELECT json_agg(to_jsonb(u) || jsonb_build_object('active_squad_names',
+      SELECT json_agg((to_jsonb(u) || jsonb_build_object('active_squad_names',
         COALESCE((SELECT json_agg(s.name ORDER BY s.name)
           FROM internal_squad_members m JOIN internal_squads s ON s.uuid=m.internal_squad_uuid
           WHERE m.user_id=u.id), '[]'::json))) ORDER BY u.id) FROM users u
