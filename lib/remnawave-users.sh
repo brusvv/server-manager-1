@@ -94,15 +94,16 @@ remnawave_users_migrate() (
     [ "$(wc -l < "$payloads" | tr -d ' ')" = "$user_count" ] || { err "Число подготовленных записей не совпало"; return 1; }
 
     # Reject duplicate source identifiers before querying or writing to the target.
-    local duplicate_key duplicates
+    local duplicate_key duplicates duplicate_count
     for duplicate_key in username shortUuid vlessUuid; do
         duplicates=$(jq -s -r --arg key "$duplicate_key" '
           [.[] | select(.[$key] != null and .[$key] != "")] |
           group_by(.[$key]) | map(select(length > 1) | .[0][$key]) | .[]
         ' "$payloads")
         if [ -n "$duplicates" ]; then
-            err "В исходных данных найдены повторяющиеся значения $duplicate_key:"
-            printf '%s\n' "$duplicates"
+            duplicate_count=$(printf '%s\n' "$duplicates" | wc -l | tr -d ' ')
+            err "В исходных данных найдены дубликаты $duplicate_key (групп: $duplicate_count)"
+            err "Значения идентификаторов не выводятся, чтобы не раскрывать credentials"
             err "Перенос остановлен до записи на целевую панель"
             return 1
         fi
