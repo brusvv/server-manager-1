@@ -289,6 +289,7 @@ migrate_menu() {
         echo -e "  ${BOLD}4)${RESET} 📦  Перенести всё (Panel + MTProxy + Hysteria2)"
         echo -e "  ${BOLD}5)${RESET} 💾  Бэкап / Восстановление (backup-restore)"
         echo -e "  ${BOLD}6)${RESET} 👥  Перенести пользователей Remnawave"
+        echo -e "  ${BOLD}7)${RESET} 🔎  Аудит связанных данных Remnawave (только чтение)"
         echo -e "  ${BOLD}0)${RESET}  ◀️ Назад"
         echo ""
         local ch; read -rp "  Выбор: " ch < /dev/tty
@@ -305,6 +306,7 @@ migrate_menu() {
             4) { check_root; migrate_all; } || true; read -rp "  Нажмите Enter для продолжения..." < /dev/tty ;;
             5) panel_backup_restore || true ;;
             6) remnawave_users_migrate || true; read -rp "  Нажмите Enter для продолжения..." < /dev/tty ;;
+            7) remnawave_users_related_audit || true; read -rp "  Нажмите Enter для продолжения..." < /dev/tty ;;
             0) return ;;
             *) warn "Неверный выбор" ;;
         esac
