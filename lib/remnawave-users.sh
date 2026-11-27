@@ -67,6 +67,7 @@ remnawave_users_migrate() (
           [ $names[] as $n | ($target[0].response.internalSquads[] | select(.name == $n) | .uuid) ] as $mapped |
           if ($u.username|test("^[A-Za-z0-9_-]{3,36}$")|not) then error("invalid username")
           elif (($u.tag // "") != "" and (($u.tag|length)>16 or ($u.tag|test("^[A-Z0-9_]+$")|not))) then error("invalid tag")
+          elif ($u.id|type) != "number" then error("missing source user id")
           elif $u.expire_at == null then error("missing expiration")
           elif ($u.short_uuid == null or $u.short_uuid == "") then error("missing short UUID")
           elif (($u.traffic_limit_bytes|tonumber? // 0) > 9007199254740991) then error("traffic limit exceeds JS safe integer")
@@ -75,6 +76,7 @@ remnawave_users_migrate() (
           elif ($u.ss_password != null and (($u.ss_password|length)<8 or ($u.ss_password|length)>32)) then error("invalid shadowsocks password")
           elif ($mapped|length) != ($names|length) then error("target squad missing") else
           {
+            sourceUserId:$u.id,
             username:$u.username, status:$u.status, shortUuid:$u.short_uuid,
             trojanPassword:$u.trojan_password, vlessUuid:$u.vless_uuid, ssPassword:$u.ss_password,
             trafficLimitBytes:($u.traffic_limit_bytes|tonumber? // 0),
@@ -169,22 +171,38 @@ remnawave_users_migrate() (
 
     local created=0 errors=0 journal_errors=0 timestamp result_status
     while IFS= read -r line; do
-        printf '%s\n' "$line" > "$body"
+        printf '%s\n' "$line" | jq 'del(.sourceUserId)' > "$body"
         username=$(jq -r '.username' "$body")
+        local source_user_id target_user_id target_user_id_json
+        source_user_id=$(printf '%s' "$line" | jq -r '.sourceUserId')
         timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
         http_code=$(curl -sS --connect-timeout 8 --max-time 30 -o "$response" -w '%{http_code}' \
             -X POST "$target_url/api/users" -K "$auth_config" \
             -H 'Content-Type: application/json' -H 'Accept: application/json' --data-binary "@$body") || http_code="000"
+        target_user_id=""
         if [[ "$http_code" = "200" || "$http_code" = "201" ]]; then
-            created=$((created+1)); result_status="CREATED"; ok "Создан: $username"
+            target_user_id=$(jq -er '.response.id | select(type == "number")' "$response" 2>/dev/null) || target_user_id=""
+            if [ -n "$target_user_id" ]; then
+                created=$((created+1)); result_status="CREATED"; ok "Создан: $username (source ID $source_user_id -> target ID $target_user_id)"
+            else
+                errors=$((errors+1)); result_status="CREATED_UNMAPPED"
+                warn "API сообщил об успешном создании $username, но response.id отсутствует; остановка для ручной сверки"
+            fi
         else
             errors=$((errors+1)); result_status="FAILED"; warn "Ошибка создания $username (HTTP $http_code); подробности ответа скрыты"
         fi
+        target_user_id_json="${target_user_id:-null}"
         if ! jq -cn --arg timestamp "$timestamp" --arg username "$username" \
             --arg status "$result_status" --arg http_code "$http_code" \
-            '{timestamp:$timestamp,username:$username,status:$status,http_code:$http_code}' >> "$journal"; then
+            --argjson source_user_id "$source_user_id" \
+            --argjson target_user_id "$target_user_id_json" \
+            '{timestamp:$timestamp,username:$username,source_user_id:$source_user_id,target_user_id:$target_user_id,status:$status,http_code:$http_code}' >> "$journal"; then
             journal_errors=$((journal_errors+1))
             warn "Не удалось записать результат $username в журнал; дальнейшее создание остановлено"
+            break
+        fi
+        if [ "$result_status" = "CREATED_UNMAPPED" ]; then
+            warn "Дальнейшие запросы остановлены: требуется сверить созданную запись на целевой панели"
             break
         fi
     done < "$payloads"
