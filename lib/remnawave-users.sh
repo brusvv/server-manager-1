@@ -19,6 +19,7 @@ remnawave_users_migrate() (
     chmod 700 "$tmpdir"
     local source_json="$tmpdir/source.json" target_squads="$tmpdir/target-squads.json"
     local response="$tmpdir/response.json" body="$tmpdir/body.json" payloads="$tmpdir/payloads.ndjson"
+    local target_matches="$tmpdir/target-matches.ndjson"
     local auth_config="$tmpdir/curl-auth.conf"
     printf 'header = "Authorization: Bearer %s"\n' "$token" > "$auth_config"
     chmod 600 "$auth_config"
@@ -111,23 +112,46 @@ remnawave_users_migrate() (
         fi
     done
 
-    # Check all primary unique identifiers on target before the first write.
-    info "Проверяем конфликты username и short UUID на целевой панели..."
-    local key value check_path check_code line
+    # Reconcile existing target users before writing. Exact protocol identifiers
+    # are required; username-only matches are never treated as migrated users.
+    info "Проверяем пользователей на целевой панели и восстанавливаем ID-сопоставления..."
+    : > "$target_matches"
+    local value check_code line source_id target_id
     while IFS= read -r line; do
-        for key in username shortUuid; do
-            value=$(printf '%s' "$line" | jq -r ".$key")
-            if [ "$key" = "username" ]; then check_path="by-username/$value"; else check_path="by-short-uuid/$value"; fi
-            check_code=$(curl -sS --connect-timeout 8 --max-time 20 -o /dev/null -w '%{http_code}' \
-                -K "$auth_config" "$target_url/api/users/$check_path") || check_code="000"
-            if [ "$check_code" = "200" ]; then
-                err "На целевой панели уже существует пользователь с $key=$value. Запись не начата."
-                return 1
-            elif [ "$check_code" != "404" ]; then
-                err "Не удалось проверить $key=$value (HTTP $check_code). Запись не начата."
+        value=$(printf '%s' "$line" | jq -r '.username')
+        check_code=$(curl -sS --connect-timeout 8 --max-time 20 -o "$response" -w '%{http_code}' \
+            -K "$auth_config" "$target_url/api/users/by-username/$value") || check_code="000"
+        if [ "$check_code" = "200" ]; then
+            if ! jq -e --argjson source "$line" '
+                .response as $target |
+                ($target.username == $source.username) and
+                ($target.shortUuid == $source.shortUuid) and
+                ($target.vlessUuid == $source.vlessUuid) and
+                ($target.trojanPassword == $source.trojanPassword) and
+                ($target.ssPassword == $source.ssPassword)
+            ' "$response" >/dev/null 2>&1; then
+                err "На целевой панели найден $value, но его идентификаторы не совпадают с исходными. Автоматическое продолжение запрещено."
                 return 1
             fi
-        done
+            source_id=$(printf '%s' "$line" | jq -r '.sourceUserId')
+            target_id=$(jq -er '.response.id | select(type == "number")' "$response" 2>/dev/null) || {
+                err "Целевой API не вернул числовой ID для $value"; return 1;
+            }
+            jq -cn --argjson source_user_id "$source_id" --argjson target_user_id "$target_id" \
+                --arg username "$value" \
+                '{source_user_id:$source_user_id,target_user_id:$target_user_id,username:$username}' >> "$target_matches"
+        elif [ "$check_code" = "404" ]; then
+            value=$(printf '%s' "$line" | jq -r '.shortUuid')
+            check_code=$(curl -sS --connect-timeout 8 --max-time 20 -o /dev/null -w '%{http_code}' \
+                -K "$auth_config" "$target_url/api/users/by-short-uuid/$value") || check_code="000"
+            if [ "$check_code" != "404" ]; then
+                err "Short UUID исходного пользователя уже занят или проверка недоступна (HTTP $check_code). Запись не начата."
+                return 1
+            fi
+        else
+            err "Не удалось проверить пользователя на целевой панели (HTTP $check_code). Запись не начата."
+            return 1
+        fi
     done < "$payloads"
 
     local target_host journal_dir journal
@@ -169,13 +193,27 @@ remnawave_users_migrate() (
     read -rp "  Для запуска введите yes: " confirm < /dev/tty
     [ "$confirm" = "yes" ] || { info "Отменено, изменений нет"; return 0; }
 
-    local created=0 errors=0 journal_errors=0 timestamp result_status
+    local created=0 skipped=0 errors=0 journal_errors=0 timestamp result_status
     while IFS= read -r line; do
         printf '%s\n' "$line" | jq 'del(.sourceUserId)' > "$body"
         username=$(jq -r '.username' "$body")
-        local source_user_id target_user_id target_user_id_json
+        local source_user_id target_user_id target_user_id_json matched
         source_user_id=$(printf '%s' "$line" | jq -r '.sourceUserId')
         timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+        matched=$(jq -s --argjson source_id "$source_user_id" '[.[] | select(.source_user_id == $source_id)] | first // empty' "$target_matches")
+        if [ -n "$matched" ]; then
+            target_user_id=$(printf '%s' "$matched" | jq -r '.target_user_id')
+            skipped=$((skipped+1)); result_status="RECONCILED"; http_code="200"
+            ok "Уже существует и проверен: $username (source ID $source_user_id -> target ID $target_user_id)"
+            target_user_id_json="$target_user_id"
+            if ! jq -cn --arg timestamp "$timestamp" --arg username "$username" \
+                --arg status "$result_status" --arg http_code "$http_code" \
+                --argjson source_user_id "$source_user_id" --argjson target_user_id "$target_user_id_json" \
+                '{timestamp:$timestamp,username:$username,source_user_id:$source_user_id,target_user_id:$target_user_id,status:$status,http_code:$http_code}' >> "$journal"; then
+                journal_errors=$((journal_errors+1)); warn "Не удалось записать сверенное соответствие в журнал; дальнейшая обработка остановлена"; break
+            fi
+            continue
+        fi
         http_code=$(curl -sS --connect-timeout 8 --max-time 30 -o "$response" -w '%{http_code}' \
             -X POST "$target_url/api/users" -K "$auth_config" \
             -H 'Content-Type: application/json' -H 'Accept: application/json' --data-binary "@$body") || http_code="000"
@@ -208,7 +246,7 @@ remnawave_users_migrate() (
     done < "$payloads"
 
     echo ""
-    echo "  Результат: создано $created из $user_count; ошибок API: $errors; ошибок журнала: $journal_errors"
+    echo "  Результат: создано $created; уже существовало и сверено: $skipped; ошибок API: $errors; ошибок журнала: $journal_errors"
     info "Журнал операций сохранён: $journal"
     if [ "$errors" -gt 0 ] || [ "$journal_errors" -gt 0 ]; then warn "Частичный перенос. Успешно созданные записи оставлены на целевой панели."; return 1; fi
     ok "Перенос учётных записей завершён"
