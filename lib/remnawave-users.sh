@@ -256,6 +256,7 @@ remnawave_users_migrate() (
     if [ "$errors" -gt 0 ] || [ "$journal_errors" -gt 0 ]; then warn "Частичный перенос. Успешно созданные записи оставлены на целевой панели."; return 1; fi
     ok "Перенос учётных записей завершён"
     info "Проверьте пользователей и подписки на целевой панели."
+)
 
 # Read-only preflight for the related Remnawave tables. No INSERT/UPDATE/DELETE
 # is performed here; the target IDs are obtained from read-only API responses.
@@ -423,4 +424,3 @@ remnawave_users_related_audit() (
     ok "Базовое сопоставление пользователей и используемых нод прошло. Это ещё не разрешение на запись."
 )
 
-)
